@@ -99,6 +99,16 @@ jobs:
           sort -o "$K" "$K"
           grep -n "N_GSM" "$K"
 
+      - name: 注入 files 覆盖层
+        working-directory: ./openwrt
+        run: |
+          mkdir -p files
+          cp -r "$GITHUB_WORKSPACE/files/." files/
+          echo "共 $(find files -type f | wc -l) 个文件"
+          find files -type f | sed 's|^|  |' | head -40
+          chmod 755 files/etc/init.d/* files/etc/uci-defaults/* files/etc/ppp/* 2>/dev/null || true
+          chmod 755 files/usr/sbin/* 2>/dev/null || true
+
       - name: 应用编译配置
         working-directory: ./openwrt
         run: |
@@ -106,14 +116,6 @@ jobs:
           make defconfig
           echo "=== 校验关键配置项 ==="
           bash "$GITHUB_WORKSPACE/scripts/verify-config.sh"
-
-      - name: 注入 files 覆盖层
-        working-directory: ./openwrt
-        run: |
-          mkdir -p files
-          cp -r "$GITHUB_WORKSPACE/files/." files/
-          find files -type f | sed 's|^|  |'
-          chmod 755 files/etc/init.d/* files/etc/uci-defaults/* files/etc/ppp/* 2>/dev/null || true
 
       - name: 下载软件包源码
         if: ${{ !inputs.verify_only }}
