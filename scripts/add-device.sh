@@ -43,7 +43,16 @@ fi
 grep -n -A3 "^define Device/fzs_5gcpe-p3" "$MK"
 
 echo "===== 3) 注入 02_network 的机型分支 ====="
-NET=target/linux/mediatek/base-files/etc/board.d/02_network
+# 不写死路径：不同版本里它可能在 target/linux/mediatek/base-files/... 或
+# target/linux/mediatek/<子目标>/base-files/... 下。实测 25.12 在 filogic 子目标里。
+NET=$(find target/linux/mediatek -path "*/base-files/etc/board.d/02_network" \
+        -not -path "*/mt7622/*" -print 2>/dev/null | head -1)
+if [ -z "$NET" ]; then
+    echo "  找不到 02_network，候选如下："
+    find target/linux/mediatek -name "02_network" 2>/dev/null
+    exit 1
+fi
+echo "  路径：$NET"
 if grep -q "fzs,5gcpe-p3" "$NET"; then
     echo "  已存在，跳过"
 else
