@@ -1,0 +1,13 @@
+# 在 Windows 上用 GitHub Desktop 提交时，Git 默认可能把文本文件的换行
+# 转成 CRLF。shell 脚本一旦带上 \r，在 Linux 上会直接报
+# `bad interpreter: /bin/sh^M` 而无法执行；二进制文件更会被破坏。
+# 这里强制全部按原样存储。
+
+* -text
+
+# 明确标记为二进制，杜绝任何形式的换行/编码转换
+*.bin    binary
+*.dtb    binary
+*.tar.gz binary
+files/usr/sbin/cmux      binary
+files/usr/sbin/sim_start binary

@@ -1,0 +1,157 @@
+#!/bin/sh /etc/rc.common
+# 板载 EC200G-CN（Cat 1）服务
+#
+# 硬件事实（实机确认，见项目 README）：
+#   - EC200G 挂在 uart2 = /dev/ttyS2 @115200，**不在 USB 上**
+#   - 它由外挂 MCU 的 modem2 供电；MCU 在 uart1 = /dev/ttyS1，57600
+#   - MCU 帧格式：7E | len(2B)=0x000A | cmd(2B)=0x0044 | mask(2B) | value(2B) | cksum(2B) | 7E
+#     cksum = 前面各字节的 16 位算术和；转义规则 0x7D + (原字节 XOR 0x7D)
+#     modem2 上电 = mask 0x3028 / value 0x0020，断电 = mask 0x0028 / value 0x0008
+#
+# 通道划分（内核 n_gsm）：
+#   /dev/gsmtty1 → pppd 数据面
+#   /dev/gsmtty2 → QModem 的 AT / 短信
+#   /dev/gsmtty3 → 备用
+#
+# 若内核 CMUX 不可用，会自动退回"直连 ttyS2"模式：拨号与 AT 二选一。
+
+START=50
+STOP=89
+USE_PROCD=1
+
+UART=/dev/ttyS2
+MCU=/dev/ttyS1
+BAUD=115200
+IFACE=wwan4g
+APN=cmnet
+AT_CH=/dev/gsmtty2
+DATA_CH=/dev/gsmtty1
+
+# ---------- MCU 供电控制 ----------
+# 用 printf 直接拼帧，不依赖任何外部工具
+mcu_frame() {
+	# $1=mask(hex4)  $2=value(hex4)
+	local m=$((0x$1)) v=$((0x$2))
+	local mh=$(((m >> 8) & 255)) ml=$((m & 255))
+	local vh=$(((v >> 8) & 255)) vl=$((v & 255))
+	local ck=$((0x0a + 0x44 + mh + ml + vh + vl))
+	local ch=$(((ck >> 8) & 255)) cl=$((ck & 255))
+	local b out=""
+	for b in 0 10 0 68 $mh $ml $vh $vl $ch $cl; do
+		if [ "$b" -eq 126 ] || [ "$b" -eq 125 ]; then
+			out="$out\\$(printf '%03o' 125)\\$(printf '%03o' $((b ^ 125)))"
+		else
+			out="$out\\$(printf '%03o' $b)"
+		fi
+	done
+	printf "\\176${out}\\176" > "$MCU"
+}
+
+modem2_on()  { mcu_frame 0028 0008; sleep 1; mcu_frame 3028 0020; }
+modem2_off() { mcu_frame 0028 0008; }
+
+modem_alive() {
+	tom_modem -d "$1" -b $BAUD -o a -c "AT" -t 3 2>/dev/null | grep -q "OK"
+}
+
+start_service() {
+	[ -e "$UART" ] || return 0
+
+	logger -t ec200g "给板载 Cat 1 模组上电"
+	modem2_on
+
+	# 等模组起来
+	local n=0
+	while [ $n -lt 60 ]; do
+		modem_alive "$UART" && break
+		n=$((n + 3)); sleep 3
+	done
+	if ! modem_alive "$UART"; then
+		logger -t ec200g "模组在 60 秒内没有应答，放弃"
+		return 0
+	fi
+	logger -t ec200g "模组已就绪（t+${n}s）"
+
+	# APN。模组刚上电时 PDP 一定未激活，此时设置不会报 CME ERROR。
+	tom_modem -d "$UART" -b $BAUD -o a -c "AT+CGDCONT=1,\"IP\",\"$APN\"" -t 5 >/dev/null 2>&1
+
+	# 优先用内核 CMUX
+	if [ -x /usr/sbin/gsmmux ] && grep -q gsm /proc/tty/ldiscs 2>/dev/null; then
+		logger -t ec200g "启用内核 CMUX"
+		procd_open_instance gsmmux
+		procd_set_param command /usr/sbin/gsmmux -b $BAUD -n 4 -m 512 "$UART"
+		procd_set_param respawn 30 10 0
+		procd_set_param stdout 1
+		procd_set_param stderr 1
+		procd_close_instance
+	else
+		logger -t ec200g "内核 CMUX 不可用，退回直连模式"
+	fi
+}
+
+service_started() {
+	local n=0
+
+	# 等 gsmtty 出现
+	while [ $n -lt 20 ]; do
+		[ -e "$AT_CH" ] && break
+		n=$((n + 1)); sleep 1
+	done
+
+	if [ -e "$AT_CH" ] && [ -e "$DATA_CH" ]; then
+		logger -t ec200g "CMUX 通道就绪：$(ls /dev/gsmtty* | tr '\n' ' ')"
+		uci -q set network.$IFACE.device="$DATA_CH"
+		uci -q set qmodem.ec200g.at_port="$AT_CH"
+		uci -q set qmodem.ec200g.sms_at_port="$AT_CH"
+		uci -q delete qmodem.ec200g.valid_at_ports
+		uci -q add_list qmodem.ec200g.valid_at_ports="$AT_CH"
+		uci -q commit network
+		uci -q commit qmodem
+	else
+		logger -t ec200g "没有 CMUX 通道，数据面与 AT 都走 $UART（二者互斥）"
+		uci -q set network.$IFACE.device="$UART"
+		uci -q set qmodem.ec200g.at_port="$UART"
+		uci -q set qmodem.ec200g.sms_at_port="$UART"
+		uci -q commit network
+		uci -q commit qmodem
+	fi
+
+	# 【重要】不要在这里用 tom_modem 之类去"探测"通道：
+	# 任何一次 open/close 都可能让复用层重建 pty，
+	# 紧接着 pppd 打开时设备恰好不存在，会报
+	# `unrecognized option '/dev/gsmtty1'`。静置几秒即可。
+	sleep 6
+
+	local i=1
+	while [ $i -le 3 ]; do
+		logger -t ec200g "拉起 $IFACE（第 $i 次）"
+		ifup "$IFACE"
+		local w=0
+		while [ $w -lt 30 ]; do
+			if ip -4 addr show "ppp-$IFACE" 2>/dev/null | grep -q "inet "; then
+				logger -t ec200g "$IFACE 已连接"
+				return 0
+			fi
+			w=$((w + 1)); sleep 1
+		done
+		i=$((i + 1)); sleep 5
+	done
+	logger -t ec200g "$IFACE 三次拉起均失败，见 logread"
+}
+
+stop_service() {
+	ifdown "$IFACE" 2>/dev/null
+	killall pppd 2>/dev/null
+}
+
+# 供人工排障：/etc/init.d/ec200g power_cycle
+power_cycle() {
+	echo "断电 modem2..."
+	modem2_off; sleep 6
+	echo "上电 modem2..."
+	modem2_on
+	echo "完成。等约 20 秒模组启动。"
+}
+
+EXTRA_COMMANDS="power_cycle"
+EXTRA_HELP="	power_cycle	用 MCU 给板载 Cat 1 模组断电重启"

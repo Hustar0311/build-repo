@@ -1,0 +1,116 @@
+#!/bin/sh
+# 首次启动时把板载 EC200G 纳入 QModem，并建好拨号接口。
+#
+# 用 uci-defaults 而不是把配置写死进包里，是为了"只编译一次"：
+# 刷完之后如果要调整，直接 ssh 改这个脚本再 `sh /etc/uci-defaults/99-ec200g-qmodem`
+# 就能重新应用，不必重编固件。
+
+[ "$(board_name 2>/dev/null || cat /tmp/sysinfo/board_name 2>/dev/null)" = "fzs,5gcpe-p3" ] || exit 0
+
+JSON=/usr/share/qmodem/modem_support.json
+SEC=ec200g
+IFACE=wwan4g
+PORT=/dev/ttyS2      # init 脚本会在 CMUX 就绪后改成 /dev/gsmtty2
+
+# ---------- 1) 往 QModem 机型表里加 ec200g ----------
+# 上游 QModem（含 3.2.0）的 ec200 系列只有 ec200a，没有 ec200g。
+if [ -f "$JSON" ] && command -v jq >/dev/null 2>&1; then
+	if ! jq -e '.modem_support.usb.ec200g' "$JSON" >/dev/null 2>&1; then
+		jq '.modem_support.usb.ec200g = {
+				"manufacturer_id": "2c7c",
+				"manufacturer": "quectel",
+				"platform": "lte",
+				"data_interface": "usb",
+				"pdp_index": "1",
+				"modes": ["ppp"]
+			}' "$JSON" > /tmp/.ms.json 2>/dev/null &&
+		jq -e . /tmp/.ms.json >/dev/null 2>&1 &&
+		cat /tmp/.ms.json > "$JSON"
+		rm -f /tmp/.ms.json
+	fi
+fi
+
+# ---------- 2) QModem 段 ----------
+# fixed_device=1 让 QModem 的扫描器跳过它（扫描只认 USB/PCIe 槽位，
+# 而本模组挂在 UART 上）。enable_dial=0 因为 QModem 的拨号后端
+# 只有 qmi/gobinet/ecm/mbim/rndis/ncm，没有 PPP —— 拨号交给 netifd。
+uci -q batch <<EOF
+set qmodem.$SEC=modem-device
+set qmodem.$SEC.name='ec200g'
+set qmodem.$SEC.alias='4G-Cat1'
+set qmodem.$SEC.manufacturer='quectel'
+set qmodem.$SEC.platform='lte'
+set qmodem.$SEC.data_interface='uart'
+set qmodem.$SEC.slot='uart2'
+set qmodem.$SEC.path='/sys/class/tty/ttyS2'
+set qmodem.$SEC.at_port='$PORT'
+set qmodem.$SEC.sms_at_port='$PORT'
+set qmodem.$SEC.state='enabled'
+set qmodem.$SEC.fixed_device='1'
+set qmodem.$SEC.enable_dial='0'
+set qmodem.$SEC.pdp_index='1'
+set qmodem.$SEC.pdp_type='ipv4'
+set qmodem.$SEC.network='ppp-$IFACE'
+set qmodem.$SEC.metric='30'
+delete qmodem.$SEC.valid_at_ports
+add_list qmodem.$SEC.valid_at_ports='$PORT'
+delete qmodem.$SEC.ports
+add_list qmodem.$SEC.ports='$PORT'
+commit qmodem
+EOF
+mkdir -p "/var/run/qmodem/${SEC}_dir"
+
+# ---------- 3) 拨号接口 ----------
+# ipv6=0 是实测结论：运营商对这张贴片种子卡不下发 IPv6，
+# PPP 只能协商出链路本地地址，DHCPv6 永远拿不到前缀，
+# 结果 LuCI 里会多出一个永远"不存在"的 wwan4g_6 幽灵接口。
+# 若将来换成有 IPv6 的卡，把这里改成 auto 并把 pdp_type 设为 ipv4v6 即可。
+uci -q batch <<EOF
+set network.$IFACE=interface
+set network.$IFACE.proto='ppp'
+set network.$IFACE.device='$PORT'
+set network.$IFACE.connect='/etc/ppp/ec200g-connect'
+set network.$IFACE.pppd_options='nocrtscts novj novjccomp noccp lcp-echo-interval 20 lcp-echo-failure 3 115200'
+set network.$IFACE.peerdns='1'
+set network.$IFACE.defaultroute='1'
+set network.$IFACE.ipv6='0'
+set network.$IFACE.metric='30'
+set network.$IFACE.persist='1'
+set network.$IFACE.maxfail='0'
+set network.$IFACE.auto='0'
+commit network
+EOF
+
+# auto=0 的原因：netifd 启动时 /dev/gsmtty* 还不存在，
+# pppd 会把设备路径当成未知选项而失败。由 /etc/init.d/ec200g 在通道就绪后独家 ifup。
+
+# ---------- 4) 防火墙 ----------
+ZONE=$(uci show firewall 2>/dev/null | grep "=zone" | while read -r L; do
+	S="${L%%=*}"
+	[ "$(uci -q get "${S}.name")" = "wan" ] && echo "$S" && break
+done)
+if [ -n "$ZONE" ]; then
+	uci -q del_list "${ZONE}.network=$IFACE"
+	uci -q add_list "${ZONE}.network=$IFACE"
+	uci -q commit firewall
+fi
+
+# ---------- 5) 软件源换成实测可用且完整的北大源 ----------
+# 默认的 vsean 源有 nikki/qmodem/video 三个 feed 拉不到；
+# 北大源实测 6/6 可用、10583 个包。
+FEEDS=/etc/apk/repositories.d/distfeeds.list
+if [ -f "$FEEDS" ] && grep -q "vsean" "$FEEDS"; then
+	cp "$FEEDS" "${FEEDS}.orig"
+	M=https://mirrors.pku.edu.cn/immortalwrt/releases/25.12-SNAPSHOT
+	A=aarch64_cortex-a53
+	cat > "$FEEDS" <<EOF
+$M/targets/mediatek/filogic/packages/packages.adb
+$M/packages/$A/base/packages.adb
+$M/packages/$A/luci/packages.adb
+$M/packages/$A/packages/packages.adb
+$M/packages/$A/routing/packages.adb
+$M/packages/$A/telephony/packages.adb
+EOF
+fi
+
+exit 0

@@ -1,0 +1,161 @@
+name: Build ImmortalWrt
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: '只做机型定义校验，不执行完整编译（约 15 分钟）'
+        type: boolean
+        default: false
+
+env:
+  REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase
+  REPO_BRANCH: '25.12'
+  QMODEM_FEED: https://github.com/FUjr/QModem.git
+  DEVICE: fzs_5gcpe-p3
+  TZ: Asia/Shanghai
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: 检出本仓库
+        uses: actions/checkout@v4
+
+      - name: 释放磁盘空间
+        run: |
+          echo "释放前："; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost /usr/local/graalvm /usr/local/.ghcup \
+                      /usr/local/share/powershell /usr/local/share/chromium \
+                      /usr/local/lib/node_modules /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          sudo apt-get -qq purge -y azure-cli google-cloud-cli microsoft-edge-stable \
+                      google-chrome-stable firefox mono-devel || true
+          sudo apt-get -qq autoremove -y
+          sudo apt-get -qq clean
+          echo "释放后："; df -h /
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y \
+            ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext \
+            gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool \
+            libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
+            libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz \
+            mkisofs msmtp ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip \
+            python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons \
+            squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto \
+            xxd zlib1g-dev zstd
+          sudo timedatectl set-timezone "$TZ"
+
+      - name: 克隆源码
+        run: |
+          git clone --depth 1 -b "$REPO_BRANCH" "$REPO_URL" openwrt
+          cd openwrt
+          echo "源码提交：$(git rev-parse --short HEAD)"
+          echo "OPENWRT_PATH=$GITHUB_WORKSPACE/openwrt" >> $GITHUB_ENV
+
+      - name: 加入 QModem feed
+        working-directory: ./openwrt
+        run: |
+          grep -q "qmodem" feeds.conf.default || \
+            echo "src-git qmodem $QMODEM_FEED" >> feeds.conf.default
+          cat feeds.conf.default
+
+      - name: 更新并安装 feeds
+        working-directory: ./openwrt
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 注入机型定义
+        working-directory: ./openwrt
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/scripts/add-device.sh"
+
+      - name: 校验设备树（与参考镜像逐字节比对）
+        working-directory: ./openwrt
+        run: |
+          set -e
+          bash "$GITHUB_WORKSPACE/scripts/verify-dts.sh"
+
+      - name: 追加内核配置（n_gsm）
+        working-directory: ./openwrt
+        run: |
+          K=target/linux/mediatek/filogic/config-6.12
+          [ -f "$K" ] || K=$(ls target/linux/mediatek/filogic/config-* | head -1)
+          echo "写入内核配置到 $K"
+          for opt in "CONFIG_N_GSM=y" "CONFIG_PPP=y" "CONFIG_PPP_ASYNC=y"; do
+            key="${opt%%=*}"
+            sed -i "/^${key}[= ]/d" "$K"
+            sed -i "/^# ${key} is not set/d" "$K"
+            echo "$opt" >> "$K"
+          done
+          sort -o "$K" "$K"
+          grep -n "N_GSM" "$K"
+
+      - name: 应用编译配置
+        working-directory: ./openwrt
+        run: |
+          cp "$GITHUB_WORKSPACE/config/seed.config" .config
+          make defconfig
+          echo "=== 校验关键配置项 ==="
+          bash "$GITHUB_WORKSPACE/scripts/verify-config.sh"
+
+      - name: 注入 files 覆盖层
+        working-directory: ./openwrt
+        run: |
+          mkdir -p files
+          cp -r "$GITHUB_WORKSPACE/files/." files/
+          find files -type f | sed 's|^|  |'
+          chmod 755 files/etc/init.d/* files/etc/uci-defaults/* files/etc/ppp/* 2>/dev/null || true
+
+      - name: 下载软件包源码
+        if: ${{ !inputs.verify_only }}
+        working-directory: ./openwrt
+        run: |
+          make download -j8 V=s 2>&1 | grep -i 'error' || true
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: 编译固件
+        if: ${{ !inputs.verify_only }}
+        working-directory: ./openwrt
+        run: |
+          echo "并发数：$(nproc)"
+          make -j$(nproc) || make -j1 V=s
+
+      - name: 整理产物
+        if: ${{ !inputs.verify_only }}
+        working-directory: ./openwrt
+        run: |
+          cd bin/targets/mediatek/filogic
+          ls -la
+          mkdir -p "$GITHUB_WORKSPACE/artifact"
+          cp -f *sysupgrade.bin *factory.bin "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          cp -f config.buildinfo feeds.buildinfo version.buildinfo sha256sums \
+                "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          cd "$GITHUB_WORKSPACE/artifact" && ls -la && sha256sum *.bin
+
+      - name: 上传固件
+        if: ${{ !inputs.verify_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: artifact/
+          retention-days: 30
+
+      - name: 上传校验产物
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-logs
+          path: |
+            openwrt/.config
+            openwrt/verify/
+          retention-days: 7
+          if-no-files-found: ignore

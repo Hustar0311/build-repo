@@ -1,0 +1,53 @@
+#!/bin/sh
+# pppd 的 connect 脚本：把 EC200G 拨到数据模式。
+#
+# 纯 ash 实现，不依赖 chat —— 这样即使软件包缺失也能拨号。
+# pppd 调用 connect 程序时把 stdin/stdout 接到 modem 的 tty 上，
+# 所以这里 printf 就是发给模组，read 就是读模组。
+#
+# 三条实机踩出来的经验，改动时务必保留：
+#
+# 1) **不要发 ATZ**。CMUX 模式下 ATZ 会复位到存储配置，可能直接拆掉多路复用，
+#    该逻辑通道会永久失效，只有重启模组才能恢复。
+#
+# 2) **不要发 AT+CGDCONT**。若 PDP 上下文已激活（例如上一次没有干净挂断），
+#    重定义会返回 `+CME ERROR: Operation not allowed`，整个拨号就此失败。
+#    APN 由 /etc/init.d/ec200g 在模组刚上电、上下文必定未激活时设置一次。
+#
+# 3) 探活要容忍无应答后重试——CMUX 通道刚建立时首帧可能丢。
+
+send() { printf '%s\r' "$1"; }
+
+i=0
+ok=0
+while [ $i -lt 3 ]; do
+	send "AT"
+	j=0
+	while [ $j -lt 3 ]; do
+		if read -t 2 line; then
+			case "$line" in
+				*OK*)    ok=1; break ;;
+				*ERROR*) break ;;
+			esac
+		else
+			break
+		fi
+		j=$((j + 1))
+	done
+	[ $ok -eq 1 ] && break
+	i=$((i + 1))
+done
+[ $ok -eq 1 ] || exit 1
+
+send "ATD*99#"
+i=0
+while [ $i -lt 25 ]; do
+	if read -t 2 line; then
+		case "$line" in
+			*CONNECT*) exit 0 ;;
+			*ERROR*|*BUSY*|*"NO CARRIER"*|*"NO DIALTONE"*) exit 1 ;;
+		esac
+	fi
+	i=$((i + 1))
+done
+exit 1

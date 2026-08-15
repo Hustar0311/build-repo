@@ -1,0 +1,47 @@
+#!/bin/sh
+
+[ "$(board_name)" = "fzs,5gcpe-p3" ] || exit 0
+
+# Keep the P3 profile in sync when a sysupgrade preserves /etc/wireless.
+rom_profile=/rom/etc/wireless/l1profile.dat
+etc_profile=/etc/wireless/l1profile.dat
+
+if [ -f "$rom_profile" ] &&
+	grep -q '^INDEX0_main_ifname=ra0;rax0$' "$rom_profile" &&
+	grep -q '^INDEX0_runtime_main_ifname=rax0;ra0$' "$rom_profile" &&
+	{ [ ! -f "$etc_profile" ] ||
+	  ! grep -q '^INDEX0_main_ifname=ra0;rax0$' "$etc_profile" ||
+	  ! grep -q '^INDEX0_runtime_main_ifname=rax0;ra0$' "$etc_profile" ||
+	  ! grep -q '^INDEX0_debug_level=0$' "$etc_profile" ||
+	  ! grep -q '^INDEX0_debug_option=0:0:0:0$' "$etc_profile"; }; then
+	cp "$rom_profile" "$etc_profile"
+fi
+
+# Do not apply the UCI correction unless the P3 profile is active.
+[ -f "$etc_profile" ] &&
+	grep -q '^INDEX0_runtime_main_ifname=rax0;ra0$' "$etc_profile" || exit 0
+
+# boot invokes wifi config before kmodloader. Generate the initial UCI
+# configuration again after the MTK driver has become available.
+if ! uci -q show wireless | grep -q '=wifi-device'; then
+	/sbin/wifi config
+fi
+
+main_type="$(uci -q get wireless.MT7981_1_1.type 2>/dev/null)"
+second_type="$(uci -q get wireless.MT7981_1_2.type 2>/dev/null)"
+
+if [ "$main_type" = "mtwifi" ] && [ "$second_type" = "mtwifi" ]; then
+	uci set wireless.MT7981_1_1.phy=rax0
+	uci set wireless.MT7981_1_1.band=2g
+	uci set wireless.MT7981_1_1.dbdc_main=1
+	uci set wireless.MT7981_1_1.htmode=HE40
+	uci set wireless.MT7981_1_1.noscan=1
+	uci set wireless.MT7981_1_2.phy=ra0
+	uci set wireless.MT7981_1_2.band=5g
+	uci set wireless.MT7981_1_2.dbdc_main=0
+	uci set wireless.MT7981_1_2.htmode=HE160
+	uci set wireless.MT7981_1_2.noscan=0
+	uci commit wireless
+fi
+
+exit 0
