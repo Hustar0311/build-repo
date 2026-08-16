@@ -1,19 +1,26 @@
 #!/bin/sh /etc/rc.common
 # 板载 EC200G-CN（Cat 1）服务
 #
-# 硬件事实（实机确认，见项目 README）：
+# 硬件事实（实机确认）：
 #   - EC200G 挂在 uart2 = /dev/ttyS2 @115200，**不在 USB 上**
-#   - 它由外挂 MCU 的 modem2 供电；MCU 在 uart1 = /dev/ttyS1，57600
+#   - 它由外挂 MCU 的 modem2 供电；MCU 在 uart1 = /dev/ttyS1，**57600**
 #   - MCU 帧格式：7E | len(2B)=0x000A | cmd(2B)=0x0044 | mask(2B) | value(2B) | cksum(2B) | 7E
 #     cksum = 前面各字节的 16 位算术和；转义规则 0x7D + (原字节 XOR 0x7D)
 #     modem2 上电 = mask 0x3028 / value 0x0020，断电 = mask 0x0028 / value 0x0008
 #
-# 通道划分（内核 n_gsm）：
+# 通道划分（内核 n_gsm CMUX）：
 #   /dev/gsmtty1 → pppd 数据面
 #   /dev/gsmtty2 → QModem 的 AT / 短信
 #   /dev/gsmtty3 → 备用
 #
-# 若内核 CMUX 不可用，会自动退回"直连 ttyS2"模式：拨号与 AT 二选一。
+# 三个曾经踩过的坑，改动都在下面标了【坑N】：
+#  【坑1】/dev/ttyS1 默认是 9600。不显式设成 57600，发出去的 MCU 帧全是乱码，
+#         模组根本不上电——表现为"AT 无应答，放弃"。
+#  【坑2】gsmtty 是带载波语义的 tty，最后一个使用者关闭就拆 DLCI。
+#         tom_modem 用阻塞式 open，第二次调用起必然卡死在等载波。
+#         对策：gsm-hold 常驻按住每条通道。
+#  【坑3】tom_modem 在 /dev/shm 放 pthread 互斥锁，被 SIGKILL 打断会留下
+#         永久锁死的锁文件，之后所有 tom_modem 在 futex 上死等。开机先清掉。
 
 START=50
 STOP=89
@@ -21,11 +28,13 @@ USE_PROCD=1
 
 UART=/dev/ttyS2
 MCU=/dev/ttyS1
+MCU_BAUD=57600
 BAUD=115200
 IFACE=wwan4g
 APN=cmnet
 AT_CH=/dev/gsmtty2
 DATA_CH=/dev/gsmtty1
+HOLD_CH="1 2 3"
 
 # ---------- MCU 供电控制 ----------
 # 用 printf 直接拼帧，不依赖任何外部工具
@@ -47,20 +56,37 @@ mcu_frame() {
 	printf "\\176${out}\\176" > "$MCU"
 }
 
-modem2_on()  { mcu_frame 0028 0008; sleep 1; mcu_frame 3028 0020; }
-modem2_off() { mcu_frame 0028 0008; }
+# 【坑1】每次发帧前都确保串口速率对
+mcu_init() {
+	[ -e "$MCU" ] || return 1
+	stty -F "$MCU" $MCU_BAUD clocal raw -echo -crtscts 2>/dev/null
+}
 
+modem2_on()  { mcu_init; mcu_frame 0028 0008; sleep 1; mcu_frame 3028 0020; }
+modem2_off() { mcu_init; mcu_frame 0028 0008; }
+
+# 直接用 shell 收发，绕开 tom_modem——上电阶段它的锁和阻塞 open 都是风险
 modem_alive() {
-	tom_modem -d "$1" -b $BAUD -o a -c "AT" -t 3 2>/dev/null | grep -q "OK"
+	local dev="$1" out
+	stty -F "$dev" $BAUD clocal raw -echo -crtscts 2>/dev/null || return 1
+	cat "$dev" > /tmp/.ec200g_probe 2>/dev/null &
+	local cp=$!
+	sleep 1
+	printf 'AT\r' > "$dev" 2>/dev/null
+	sleep 2
+	kill $cp 2>/dev/null
+	grep -q "OK" /tmp/.ec200g_probe 2>/dev/null
 }
 
 start_service() {
 	[ -e "$UART" ] || return 0
 
-	logger -t ec200g "给板载 Cat 1 模组上电"
+	# 【坑3】清掉上次残留的 tom_modem 互斥锁
+	rm -f /dev/shm/tom_modem_lock_* 2>/dev/null
+
+	logger -t ec200g "给板载 Cat 1 模组上电（MCU @${MCU_BAUD}）"
 	modem2_on
 
-	# 等模组起来
 	local n=0
 	while [ $n -lt 60 ]; do
 		modem_alive "$UART" && break
@@ -72,10 +98,9 @@ start_service() {
 	fi
 	logger -t ec200g "模组已就绪（t+${n}s）"
 
-	# APN。模组刚上电时 PDP 一定未激活，此时设置不会报 CME ERROR。
-	tom_modem -d "$UART" -b $BAUD -o a -c "AT+CGDCONT=1,\"IP\",\"$APN\"" -t 5 >/dev/null 2>&1
+	# 不发 AT+CGDCONT：模组出厂就是 IPV4V6/cmnet，够用；
+	# 而且 PDP 已激活时改它会回 CME ERROR。
 
-	# 优先用内核 CMUX
 	if [ -x /usr/sbin/gsmmux ] && grep -q gsm /proc/tty/ldiscs 2>/dev/null; then
 		logger -t ec200g "启用内核 CMUX"
 		procd_open_instance gsmmux
@@ -84,6 +109,15 @@ start_service() {
 		procd_set_param stdout 1
 		procd_set_param stderr 1
 		procd_close_instance
+
+		# 【坑2】每条通道一个常驻持有者，DLCI 才不会被拆掉
+		local ch
+		for ch in $HOLD_CH; do
+			procd_open_instance hold$ch
+			procd_set_param command /usr/sbin/gsm-hold /dev/gsmtty$ch
+			procd_set_param respawn 30 5 0
+			procd_close_instance
+		done
 	else
 		logger -t ec200g "内核 CMUX 不可用，退回直连模式"
 	fi
@@ -92,21 +126,40 @@ start_service() {
 service_started() {
 	local n=0
 
-	# 等 gsmtty 出现
-	while [ $n -lt 20 ]; do
-		[ -e "$AT_CH" ] && break
+	while [ $n -lt 25 ]; do
+		[ -e "$AT_CH" ] && [ -e "$DATA_CH" ] && break
 		n=$((n + 1)); sleep 1
 	done
 
 	if [ -e "$AT_CH" ] && [ -e "$DATA_CH" ]; then
-		logger -t ec200g "CMUX 通道就绪：$(ls /dev/gsmtty* | tr '\n' ' ')"
+		# 保险起见自己也设一遍 clocal，不依赖 gsm-hold 的先后顺序
+		local ch
+		for ch in $HOLD_CH; do
+			stty -F /dev/gsmtty$ch clocal raw -echo -crtscts 2>/dev/null
+		done
+		logger -t ec200g "CMUX 通道就绪"
 		uci -q set network.$IFACE.device="$DATA_CH"
 		uci -q set qmodem.ec200g.at_port="$AT_CH"
 		uci -q set qmodem.ec200g.sms_at_port="$AT_CH"
 		uci -q delete qmodem.ec200g.valid_at_ports
 		uci -q add_list qmodem.ec200g.valid_at_ports="$AT_CH"
+		# QModem 的"AT 调试"下拉是从 ports 取的。首刷时这里还是 /dev/ttyS2，
+		# 而 ttyS2 此刻已被 gsmmux 独占，选它发命令只会拿到 EOF。
+		uci -q delete qmodem.ec200g.ports
+		for ch in $HOLD_CH; do
+			uci -q add_list qmodem.ec200g.ports="/dev/gsmtty$ch"
+		done
 		uci -q commit network
 		uci -q commit qmodem
+
+		# 等 gsm-hold 真正按住通道再拨号。
+		# 注意：这里只能查进程，绝不能去读 /proc/*/fd/8 —— 那等于读串口，会卡住。
+		n=0
+		while [ $n -lt 20 ]; do
+			pgrep -f "gsm-hold $AT_CH" >/dev/null 2>&1 && break
+			n=$((n + 1)); sleep 1
+		done
+		sleep 3
 	else
 		logger -t ec200g "没有 CMUX 通道，数据面与 AT 都走 $UART（二者互斥）"
 		uci -q set network.$IFACE.device="$UART"
@@ -114,13 +167,8 @@ service_started() {
 		uci -q set qmodem.ec200g.sms_at_port="$UART"
 		uci -q commit network
 		uci -q commit qmodem
+		sleep 3
 	fi
-
-	# 【重要】不要在这里用 tom_modem 之类去"探测"通道：
-	# 任何一次 open/close 都可能让复用层重建 pty，
-	# 紧接着 pppd 打开时设备恰好不存在，会报
-	# `unrecognized option '/dev/gsmtty1'`。静置几秒即可。
-	sleep 6
 
 	local i=1
 	while [ $i -le 3 ]; do
@@ -130,6 +178,8 @@ service_started() {
 		while [ $w -lt 30 ]; do
 			if ip -4 addr show "ppp-$IFACE" 2>/dev/null | grep -q "inet "; then
 				logger -t ec200g "$IFACE 已连接"
+				# ppp-wwan4g 此刻才存在，重扫一次让 4G 指示灯绑上去
+				/etc/init.d/led restart >/dev/null 2>&1
 				return 0
 			fi
 			w=$((w + 1)); sleep 1

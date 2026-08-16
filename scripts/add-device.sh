@@ -43,12 +43,15 @@ fi
 grep -n -A3 "^define Device/fzs_5gcpe-p3" "$MK"
 
 echo "===== 3) 注入 02_network 的机型分支 ====="
-# 不写死路径：不同版本里它可能在 target/linux/mediatek/base-files/... 或
-# target/linux/mediatek/<子目标>/base-files/... 下。实测 25.12 在 filogic 子目标里。
-NET=$(find target/linux/mediatek -path "*/base-files/etc/board.d/02_network" \
-        -not -path "*/mt7622/*" -print 2>/dev/null | head -1)
-if [ -z "$NET" ]; then
-    echo "  找不到 02_network，候选如下："
+# 【踩过的坑】这里原来用 find + head -1 去"自动找"，但 mediatek 下有四个子目标
+# （filogic / mt7622 / mt7623 / mt7629）各自都有一份 02_network，只排除 mt7622
+# 根本不够——分支被插进了别的子目标，本机型编出来的镜像里压根没有它，
+# 于是落到默认分支 `ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" wan`，
+# 而本机只有 lan1，桥里多出三个不存在的口。
+# 本机型是 filogic，直接写死，找不到就让编译失败，不要"猜"。
+NET=target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+if [ ! -f "$NET" ]; then
+    echo "  找不到 $NET，当前树里的候选如下："
     find target/linux/mediatek -name "02_network" 2>/dev/null
     exit 1
 fi

@@ -51,6 +51,12 @@ done
 if [ "$n" = "3" ]; then ok "设备树内含 green:wifi / green:4g / green:5g 三个 GPIO LED"
 else bad "设备树里只找到 $n/3 个 LED 定义"; fi
 need_cfg CONFIG_PACKAGE_qmodem "qmodem（提供 qmodem_led 服务，可把 4G/5G LED 绑到模组状态）"
+# 光有设备树定义还不够：mt_wifi 不注册 phy1tpt 触发器，不接 netdev 的话三个灯全灭。
+if [ -f "$W/files/etc/uci-defaults/22-fzs-p3-leds" ]; then
+    ok "22-fzs-p3-leds（把三个 LED 绑到 ra0 / ppp-wwan4g / usb0）"
+else
+    bad "缺少 22-fzs-p3-leds —— 三个 LED 会一直不亮"
+fi
 
 echo "========== 4. n_gsm 内核 CMUX =========="
 K=$(ls target/linux/mediatek/filogic/config-* 2>/dev/null | head -1)
@@ -67,9 +73,18 @@ for p in chat comgt ppp luci-proto-ppp kmod-usb-serial-option kmod-usb-serial-ww
 done
 echo "  --- files 覆盖层里的 EC200G 组件 ---"
 for f in etc/init.d/ec200g etc/ppp/ec200g-connect etc/uci-defaults/99-ec200g-qmodem \
-         usr/sbin/cmux usr/sbin/sim_start; do
+         usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold; do
     if [ -f "$W/files/$f" ]; then ok "files/$f"; else bad "files/$f 缺失"; fi
 done
+# 实机验证过的三条：MCU 波特率、通道常驻持有、开机清理 tom_modem 残留锁。
+# 少任何一条，模组要么不上电，要么第二条 AT 命令起就永久卡死。
+INIT="$W/files/etc/init.d/ec200g"
+grep -q 'stty -F "$MCU" \$MCU_BAUD'      "$INIT" && ok "init 脚本设置了 MCU 串口波特率（ttyS1 默认 9600，不设就发乱码）" \
+                                                 || bad "init 脚本没设 MCU 波特率 —— 模组不会上电"
+grep -q 'gsm-hold /dev/gsmtty'           "$INIT" && ok "init 脚本为每条 CMUX 通道拉起常驻持有者" \
+                                                 || bad "init 脚本没有通道持有者 —— gsmtty 重开会永久阻塞"
+grep -q 'rm -f /dev/shm/tom_modem_lock_' "$INIT" && ok "init 脚本开机清理 tom_modem 残留互斥锁" \
+                                                 || bad "init 脚本没清理 tom_modem 锁 —— 异常退出后 AT 会 futex 死等"
 if [ -f "$W/files/etc/uci-defaults/21-fzs-p3-wifi" ]; then
     ok "files/etc/uci-defaults/21-fzs-p3-wifi（iniwex 的无线修正，必须保留）"
 else
@@ -81,6 +96,15 @@ need_cfg CONFIG_TARGET_mediatek                              "目标 mediatek"
 need_cfg CONFIG_TARGET_mediatek_filogic                      "子目标 filogic"
 need_cfg CONFIG_TARGET_mediatek_filogic_DEVICE_fzs_5gcpe-p3  "机型 fzs_5gcpe-p3"
 need_cfg CONFIG_TARGET_ROOTFS_SQUASHFS                       "squashfs 根文件系统"
+# 上一版就栽在这里：分支被 find 插进了别的子目标，编出来的镜像没有它，
+# 桥里多出 lan2/lan3/lan4 三个本机不存在的口。必须查 filogic 这一份。
+NETF=target/linux/mediatek/filogic/base-files/etc/board.d/02_network
+if grep -q 'fzs,5gcpe-p3' "$NETF" 2>/dev/null &&
+   grep -A2 'fzs,5gcpe-p3' "$NETF" | grep -q 'ucidef_set_interfaces_lan_wan "lan1" wan'; then
+    ok "02_network 里的机型分支（lan1 + wan，与参考镜像一致）"
+else
+    bad "02_network 缺少 fzs,5gcpe-p3 分支或内容不符 —— 会落到默认的四口分支"
+fi
 
 echo "========== 7. 与参考镜像的包集合差异 =========="
 # 参考镜像的包名带 ABI 版本后缀（libubox20260213、libblkid1…），

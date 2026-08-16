@@ -1,0 +1,33 @@
+#!/bin/sh
+# 把面板上的三个 LED 接到实际的网络设备上。
+#
+# 背景：本机型的 LED 全部由设备树定义（green:wifi / green:4g / green:5g），
+# 但设备树里给 wifi 灯写的 default-trigger 是 "phy1tpt" —— 那是 mac80211
+# 才会注册的触发器。本机用的是联发科私有的 mt_wifi，根本不注册它，
+# 于是触发器落到 none，三个灯从开机到关机一直是灭的。
+# 参考固件（iniwex）也没做这一步，所以它那边同样三灯全灭。
+#
+# 内核实际提供的触发器只有：none / timer / heartbeat / default-on / netdev / pattern
+# 因此这里统一用 netdev，各自绑到对应的网络设备上：
+#   wifi -> ra0（2.4G AP）
+#   4g   -> ppp-wwan4g（板载 EC200G 拨号后才出现，netdev 触发器支持延后绑定）
+#   5g   -> usb0（M.2 的 RM500U）
+
+# 已经配过就不重复加（避免 sysupgrade 保留配置时叠加出重复段）
+uci -q get system.@led[0] >/dev/null && exit 0
+
+add_led() { # 名称 sysfs节点 网络设备
+	uci -q add system led >/dev/null
+	uci -q set system.@led[-1].name="$1"
+	uci -q set system.@led[-1].sysfs="$2"
+	uci -q set system.@led[-1].trigger='netdev'
+	uci -q set system.@led[-1].dev="$3"
+	uci -q set system.@led[-1].mode='link tx rx'
+}
+
+add_led wifi 'green:wifi' 'ra0'
+add_led 4g   'green:4g'   'ppp-wwan4g'
+add_led 5g   'green:5g'   'usb0'
+
+uci -q commit system
+exit 0

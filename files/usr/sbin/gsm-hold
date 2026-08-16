@@ -1,0 +1,27 @@
+#!/bin/sh
+# 常驻持有一条 CMUX 逻辑通道。
+#
+# 为什么必须有这个东西：
+#   内核 n_gsm 的 /dev/gsmttyN 是"带载波语义"的 tty。DLCI 在最后一个使用者
+#   关闭时会被拆掉，DCD 随之落下；下一次 open() 若不带 O_NONBLOCK，就会永远
+#   卡在 tty_port_block_til_ready 等载波。QModem 的 tom_modem 正是阻塞式 open，
+#   于是"第一条 AT 命令能通、之后全部卡死"。
+#   让一个进程从头到尾按住 fd，DLCI 就不会被拆，后来者 open 立刻返回。
+#
+# 用法: gsm-hold /dev/gsmtty2
+set -u
+D="${1:?用法: gsm-hold /dev/gsmttyN}"
+
+n=0
+while [ ! -e "$D" ]; do
+	n=$((n + 1))
+	[ $n -gt 60 ] && exit 1
+	sleep 1
+done
+
+# 先加 clocal：GNU stty 用 O_NONBLOCK 打开，不会被载波卡住；
+# 设好之后我们自己的 open 也就不会阻塞了。
+stty -F "$D" clocal raw -echo -crtscts 2>/dev/null
+
+exec 8<> "$D" || exit 1
+while :; do sleep 3600; done
