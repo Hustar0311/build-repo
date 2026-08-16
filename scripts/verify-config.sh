@@ -73,7 +73,7 @@ for p in chat comgt ppp luci-proto-ppp kmod-usb-serial-option kmod-usb-serial-ww
 done
 echo "  --- files 覆盖层里的 EC200G 组件 ---"
 for f in etc/init.d/ec200g etc/ppp/ec200g-connect etc/uci-defaults/99-ec200g-qmodem \
-         usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold; do
+         usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold usr/sbin/qmodem-atports-patch; do
     if [ -f "$W/files/$f" ]; then ok "files/$f"; else bad "files/$f 缺失"; fi
 done
 # 实机验证过的三条：MCU 波特率、通道常驻持有、开机清理 tom_modem 残留锁。
@@ -85,6 +85,8 @@ grep -q 'gsm-hold /dev/gsmtty'           "$INIT" && ok "init 脚本为每条 CMU
                                                  || bad "init 脚本没有通道持有者 —— gsmtty 重开会永久阻塞"
 grep -q 'rm -f /dev/shm/tom_modem_lock_' "$INIT" && ok "init 脚本开机清理 tom_modem 残留互斥锁" \
                                                  || bad "init 脚本没清理 tom_modem 锁 —— 异常退出后 AT 会 futex 死等"
+grep -q 'qmodem-atports-patch'           "$INIT" && ok "init 脚本每次开机重打 QModem 的 AT 端口补丁（防 apk 升级覆盖）" \
+                                                 || bad "init 脚本没调用 qmodem-atports-patch —— AT 调试下拉框里看不到 gsmtty"
 if [ -f "$W/files/etc/uci-defaults/21-fzs-p3-wifi" ]; then
     ok "files/etc/uci-defaults/21-fzs-p3-wifi（iniwex 的无线修正，必须保留）"
 else

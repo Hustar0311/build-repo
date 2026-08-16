@@ -21,6 +21,9 @@
 #         对策：gsm-hold 常驻按住每条通道。
 #  【坑3】tom_modem 在 /dev/shm 放 pthread 互斥锁，被 SIGKILL 打断会留下
 #         永久锁死的锁文件，之后所有 tom_modem 在 futex 上死等。开机先清掉。
+#  【坑4】QModem"AT 调试"的端口下拉框只遍历后端给的 other_ttys，而后端只 glob
+#         ttyUSB/ttyACM/mhi_DUN/wwanNatN，认不得 /dev/gsmttyN，于是本模组
+#         在那个页面上一个可用端口都没有。见 qmodem-atports-patch。
 
 START=50
 STOP=89
@@ -84,6 +87,11 @@ start_service() {
 	# 【坑3】清掉上次残留的 tom_modem 互斥锁
 	rm -f /dev/shm/tom_modem_lock_* 2>/dev/null
 
+	# 【坑4】QModem 的 AT 调试下拉框只列 ttyUSB/ttyACM/mhi_DUN/wwanNatN，
+	# 认不得 CMUX 的 /dev/gsmttyN。补丁是幂等的，每次开机跑一遍，
+	# 这样即使 apk 升级把 qmodem 覆盖回去，下次重启也会自动补上。
+	[ -x /usr/sbin/qmodem-atports-patch ] && /usr/sbin/qmodem-atports-patch
+
 	logger -t ec200g "给板载 Cat 1 模组上电（MCU @${MCU_BAUD}）"
 	modem2_on
 
@@ -143,6 +151,10 @@ service_started() {
 		uci -q set qmodem.ec200g.sms_at_port="$AT_CH"
 		uci -q delete qmodem.ec200g.valid_at_ports
 		uci -q add_list qmodem.ec200g.valid_at_ports="$AT_CH"
+		# gsmtty3 是空闲的备用通道，AT 实测可用，一并登记为有效口；
+		# gsmtty1 故意不登记——它被 pppd 占着跑 PPP 帧，发 AT 不会有回应，
+		# 页面会把它标成 (invalid)，这正是我们要的提示。
+		uci -q add_list qmodem.ec200g.valid_at_ports='/dev/gsmtty3'
 		# QModem 的"AT 调试"下拉是从 ports 取的。首刷时这里还是 /dev/ttyS2，
 		# 而 ttyS2 此刻已被 gsmmux 独占，选它发命令只会拿到 EOF。
 		uci -q delete qmodem.ec200g.ports
