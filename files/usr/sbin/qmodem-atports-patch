@@ -12,17 +12,25 @@
 #
 # 【关键】这段逻辑在系统里有**两份**，必须都补，只补一份没有任何效果：
 #   1. /usr/share/qmodem/modem_ctrl.sh  <- LuCI 页面实际走的就是这份
-#        controller/qmodem.lua 里 modem_ctrl = "/usr/share/qmodem/modem_ctrl.sh "
-#        页面 XHR.get(... "modem_ctrl") -> modemCtrl() -> shell(modem_ctrl.."get_at_cfg "..cfg)
+#        controller/qmodem.lua:10  modem_ctrl = "/usr/share/qmodem/modem_ctrl.sh "
+#        modem_debug.htm:24        XHR.get(build_url(... "modem_ctrl") ...)
+#        controller/qmodem.lua:70  modemCtrl() -> shell(modem_ctrl.."get_at_cfg "..cfg_id)
+#      —— 也就是说页面根本不经过 ubus/rpcd，光补第 2 份用 ubus 验证会"看着通了"，
+#         但页面上毫无变化。
 #   2. /usr/libexec/rpcd/qmodem        <- ubus/rpcd 调用走这份
-#   两份里那一行的文本完全相同，所以用同一个匹配规则处理。
 #
-# 修法：在生成 other_ttys 之前，把该模组自己在 uci 里登记的 ports 并进 all_ttys，
-# 然后去重（5G 模组的 ports 本来就是 ttyUSB0~4，不去重下拉框里会出现重复项）。
+# 修法：在 `json_add_array other_ttys` 之前插两行，把该模组自己在 uci 里登记的
+# ports 并进 all_ttys 并去重（5G 模组的 ports 本来就是 ttyUSB0~4，不去重
+# 下拉框里会出现重复项）。
 #
-# 这是对第三方软件包文件的原地小补丁：幂等、只认上游原样那一行、改完做语法自检、
-# 失败不动原文件。并由 ec200g 服务每次开机调用一次——万一 apk 升级把 qmodem
-# 覆盖回去，下次重启会自动补上。
+# 锚点特意选 `json_add_array other_ttys` 而不是某一行 all_ttys 的原文：
+# 前者是前端契约的一部分（字段名不会改），后者只要上游调整一下 glob 列表
+# 或空格就匹配不上了。插入前还会确认紧随其后的循环确实在遍历 $all_ttys。
+#
+# 这是对第三方软件包文件的原地小补丁：幂等、带结构校验、改完做语法自检、
+# 失败不动原文件、原文件备份为同名 .qmorig。
+# 并由 ec200g 服务每次开机调用一次——万一 apk 升级把 qmodem 覆盖回去，
+# 下次重启会自动补上。
 
 MARK=qmodem_atports_patched
 TARGETS="/usr/share/qmodem/modem_ctrl.sh /usr/libexec/rpcd/qmodem"
@@ -33,23 +41,27 @@ patch_one() {
 	[ -f "$F" ] || return 0
 	grep -q "$MARK" "$F" && return 0
 
-	# 只认上游那一行原样；被改过就不动，免得把文件改坏
-	if ! grep -q '^[[:space:]]*all_ttys="\$duns \$ttys \$ttyacms \$wwanNatN"$' "$F"; then
-		logger -t qmodem-atports "$F 里没找到预期的 all_ttys 行，跳过（qmodem 可能已升级）"
+	# 结构校验：必须有 other_ttys 数组，且其后的循环遍历的是 $all_ttys
+	if ! grep -q 'json_add_array[[:space:]]\+other_ttys' "$F"; then
+		logger -t qmodem-atports "$F 里没有 other_ttys 数组，跳过（qmodem 结构已变）"
+		return 0
+	fi
+	if ! grep -A3 'json_add_array[[:space:]]\+other_ttys' "$F" | grep -q 'for .* in \$all_ttys'; then
+		logger -t qmodem-atports "$F 里 other_ttys 不是遍历 \$all_ttys，跳过（qmodem 结构已变）"
 		return 0
 	fi
 
 	awk -v mark="$MARK" '
-	{
-		print
-		if ($0 ~ /^[ \t]*all_ttys="\$duns \$ttys \$ttyacms \$wwanNatN"$/) {
-			match($0, /^[ \t]*/)
-			ind = substr($0, 1, RLENGTH)
-			print ind "# " mark ": 并入本模组登记的 ports（含 /dev/gsmttyN）后去重"
-			print ind "all_ttys=\"$all_ttys $(uci -q get qmodem.$config_section.ports 2>/dev/null)\""
-			print ind "_qm_t=\"\"; for _qm_p in $all_ttys; do case \" $_qm_t \" in *\" $_qm_p \"*) ;; *) _qm_t=\"$_qm_t $_qm_p\";; esac; done; all_ttys=\"$_qm_t\""
-		}
-	}' "$F" > "$F.qmnew" || { rm -f "$F.qmnew"; return 1; }
+	/^[ \t]*json_add_array[ \t]+other_ttys[ \t]*$/ && !done {
+		match($0, /^[ \t]*/)
+		ind = substr($0, 1, RLENGTH)
+		print ind "# " mark ": 并入本模组登记的 ports（含 /dev/gsmttyN）后去重"
+		print ind "all_ttys=\"$all_ttys $(uci -q get qmodem.$config_section.ports 2>/dev/null)\""
+		print ind "_qm_t=\"\"; for _qm_p in $all_ttys; do case \" $_qm_t \" in *\" $_qm_p \"*) ;; *) _qm_t=\"$_qm_t $_qm_p\";; esac; done; all_ttys=\"$_qm_t\""
+		done = 1
+	}
+	{ print }
+	' "$F" > "$F.qmnew" || { rm -f "$F.qmnew"; return 1; }
 
 	if grep -q "$MARK" "$F.qmnew" && sh -n "$F.qmnew" 2>/dev/null; then
 		cat "$F" > "$F.qmorig" 2>/dev/null      # 备份
