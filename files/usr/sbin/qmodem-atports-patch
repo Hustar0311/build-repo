@@ -5,53 +5,68 @@
 #   前端 /usr/lib/lua/luci/view/qmodem/modem_debug.htm 里，下拉框**只遍历
 #   other_ttys**，config.ports 仅用来给选项打 (valid)/(using)/(不属于此模组) 标签：
 #       for (let port of other_ttys) { ... if (ports.includes(port) == false) ... }
-#   而后端 /usr/libexec/rpcd/qmodem 生成 other_ttys 时只 glob 了
+#   而生成 other_ttys 的那段只 glob 了
 #       /dev/mhi_DUN*  /dev/ttyUSB*  /dev/ttyACM*  /dev/wwan[0-9]at[0-9]
-#   板载 EC200G 走的是内核 n_gsm 复用出来的 /dev/gsmtty1..3，一个都不匹配，
-#   所以下拉框里只有 5G 模组的 ttyUSB0~4，还全被标成"不属于此模组"。
+#   板载 EC200G 走的是 n_gsm 复用出来的 /dev/gsmtty1..3，一个都不匹配，
+#   所以无论 uci 里的 ports 怎么写，它都进不了下拉框。
+#
+# 【关键】这段逻辑在系统里有**两份**，必须都补，只补一份没有任何效果：
+#   1. /usr/share/qmodem/modem_ctrl.sh  <- LuCI 页面实际走的就是这份
+#        controller/qmodem.lua 里 modem_ctrl = "/usr/share/qmodem/modem_ctrl.sh "
+#        页面 XHR.get(... "modem_ctrl") -> modemCtrl() -> shell(modem_ctrl.."get_at_cfg "..cfg)
+#   2. /usr/libexec/rpcd/qmodem        <- ubus/rpcd 调用走这份
+#   两份里那一行的文本完全相同，所以用同一个匹配规则处理。
 #
 # 修法：在生成 other_ttys 之前，把该模组自己在 uci 里登记的 ports 并进 all_ttys，
 # 然后去重（5G 模组的 ports 本来就是 ttyUSB0~4，不去重下拉框里会出现重复项）。
 #
-# 这是对第三方软件包文件的原地小补丁，做成幂等，并由 ec200g 服务每次开机调用一次：
-# 万一将来 apk 升级把 qmodem 覆盖回去，下次重启会自动补上。
-# 原文件备份在同目录的 .qmodem-atports.orig。
+# 这是对第三方软件包文件的原地小补丁：幂等、只认上游原样那一行、改完做语法自检、
+# 失败不动原文件。并由 ec200g 服务每次开机调用一次——万一 apk 升级把 qmodem
+# 覆盖回去，下次重启会自动补上。
 
-F=/usr/libexec/rpcd/qmodem
 MARK=qmodem_atports_patched
-ORIG=/usr/libexec/.qmodem-atports.orig
+TARGETS="/usr/share/qmodem/modem_ctrl.sh /usr/libexec/rpcd/qmodem"
+rc=0
 
-[ -f "$F" ] || exit 0
-grep -q "$MARK" "$F" && exit 0
+patch_one() {
+	F="$1"
+	[ -f "$F" ] || return 0
+	grep -q "$MARK" "$F" && return 0
 
-# 只认上游那一行原样；被改过就不动，免得把文件改坏
-if ! grep -q '^[[:space:]]*all_ttys="\$duns \$ttys \$ttyacms \$wwanNatN"$' "$F"; then
-	logger -t qmodem-atports "未找到预期的 all_ttys 行，跳过（qmodem 可能已升级）"
-	exit 0
-fi
+	# 只认上游那一行原样；被改过就不动，免得把文件改坏
+	if ! grep -q '^[[:space:]]*all_ttys="\$duns \$ttys \$ttyacms \$wwanNatN"$' "$F"; then
+		logger -t qmodem-atports "$F 里没找到预期的 all_ttys 行，跳过（qmodem 可能已升级）"
+		return 0
+	fi
 
-cp "$F" "$ORIG" 2>/dev/null
+	awk -v mark="$MARK" '
+	{
+		print
+		if ($0 ~ /^[ \t]*all_ttys="\$duns \$ttys \$ttyacms \$wwanNatN"$/) {
+			match($0, /^[ \t]*/)
+			ind = substr($0, 1, RLENGTH)
+			print ind "# " mark ": 并入本模组登记的 ports（含 /dev/gsmttyN）后去重"
+			print ind "all_ttys=\"$all_ttys $(uci -q get qmodem.$config_section.ports 2>/dev/null)\""
+			print ind "_qm_t=\"\"; for _qm_p in $all_ttys; do case \" $_qm_t \" in *\" $_qm_p \"*) ;; *) _qm_t=\"$_qm_t $_qm_p\";; esac; done; all_ttys=\"$_qm_t\""
+		}
+	}' "$F" > "$F.qmnew" || { rm -f "$F.qmnew"; return 1; }
 
-awk -v mark="$MARK" '
-{
-	print
-	if ($0 ~ /^[ \t]*all_ttys="\$duns \$ttys \$ttyacms \$wwanNatN"$/) {
-		match($0, /^[ \t]*/)
-		ind = substr($0, 1, RLENGTH)
-		print ind "# " mark ": 并入本模组登记的 ports（含 /dev/gsmttyN）后去重"
-		print ind "all_ttys=\"$all_ttys $(uci -q get qmodem.$config_section.ports 2>/dev/null)\""
-		print ind "_qm_t=\"\"; for _qm_p in $all_ttys; do case \" $_qm_t \" in *\" $_qm_p \"*) ;; *) _qm_t=\"$_qm_t $_qm_p\";; esac; done; all_ttys=\"$_qm_t\""
-	}
-}' "$F" > "$F.new" || { rm -f "$F.new"; exit 1; }
+	if grep -q "$MARK" "$F.qmnew" && sh -n "$F.qmnew" 2>/dev/null; then
+		cat "$F" > "$F.qmorig" 2>/dev/null      # 备份
+		cat "$F.qmnew" > "$F"                   # 用 cat 而非 mv，保住属主与权限
+		rm -f "$F.qmnew"
+		logger -t qmodem-atports "已给 $F 打上 CMUX 通道补丁"
+		return 0
+	fi
 
-if grep -q "$MARK" "$F.new" && sh -n "$F.new" 2>/dev/null; then
-	cat "$F.new" > "$F"          # 用 cat 而不是 mv，保住原有属主与权限
-	rm -f "$F.new"
-	logger -t qmodem-atports "已给 $F 打上 CMUX 通道补丁"
-	/etc/init.d/rpcd restart >/dev/null 2>&1
-else
-	logger -t qmodem-atports "补丁后语法检查失败，未改动原文件"
-	rm -f "$F.new"
-	exit 1
-fi
-exit 0
+	logger -t qmodem-atports "$F 补丁后语法检查失败，未改动原文件"
+	rm -f "$F.qmnew"
+	return 1
+}
+
+for f in $TARGETS; do
+	patch_one "$f" || rc=1
+done
+
+/etc/init.d/rpcd restart >/dev/null 2>&1
+exit $rc

@@ -87,6 +87,15 @@ grep -q 'rm -f /dev/shm/tom_modem_lock_' "$INIT" && ok "init 脚本开机清理 
                                                  || bad "init 脚本没清理 tom_modem 锁 —— 异常退出后 AT 会 futex 死等"
 grep -q 'qmodem-atports-patch'           "$INIT" && ok "init 脚本每次开机重打 QModem 的 AT 端口补丁（防 apk 升级覆盖）" \
                                                  || bad "init 脚本没调用 qmodem-atports-patch —— AT 调试下拉框里看不到 gsmtty"
+# 生成 other_ttys 的逻辑在系统里有两份，补丁必须两份都覆盖。
+# 只补 /usr/libexec/rpcd/qmodem 是无效的——LuCI 页面走的是 modem_ctrl.sh 那份。
+PATCHER="$W/files/usr/sbin/qmodem-atports-patch"
+if grep -q '/usr/share/qmodem/modem_ctrl.sh' "$PATCHER" &&
+   grep -q '/usr/libexec/rpcd/qmodem'        "$PATCHER"; then
+    ok "AT 端口补丁同时覆盖 modem_ctrl.sh（页面路径）与 rpcd/qmodem（ubus 路径）"
+else
+    bad "AT 端口补丁没有同时覆盖两份 other_ttys 生成逻辑"
+fi
 if [ -f "$W/files/etc/uci-defaults/21-fzs-p3-wifi" ]; then
     ok "files/etc/uci-defaults/21-fzs-p3-wifi（iniwex 的无线修正，必须保留）"
 else
