@@ -1,0 +1,15 @@
+#!/bin/sh /etc/rc.common
+# 开机重打那些针对第三方软件包的界面小补丁。
+#
+# 为什么要每次开机跑：这些补丁改的是软件包自带的文件，一旦用 apk 升级了
+# 对应的包，改动就被覆盖回去了。放在这里，下次重启会自动补上。
+# 每个补丁自身都是幂等的，已经打过就直接返回。
+
+START=95
+
+start() {
+	[ -x /usr/sbin/luci-mtwifi-encryption-patch ] && /usr/sbin/luci-mtwifi-encryption-patch
+	# QModem 的 AT 端口补丁由 ec200g 服务负责（它要在模组起来之后才有意义），
+	# 这里不重复调用。
+	return 0
+}

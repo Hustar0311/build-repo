@@ -1,0 +1,69 @@
+#!/bin/sh
+# 让 LuCI 的"无线安全"页面对联发科私有驱动（type=mtwifi）也给出加密选项。
+#
+# 问题所在：
+#   /www/luci-static/resources/view/network/wireless.js（luci-mod-network 提供）
+#   里，加密下拉框的候选是这样攒出来的：
+#       const crypto_modes=[];
+#       if (hwtype=='mac80211') { ...psk2/psk/psk-mixed/sae/owe/wpa2... }
+#       else if (hwtype=='broadcom') { ...psk2/psk/wep... }
+#       crypto_modes.push(['none', 'No Encryption', 0]);
+#   上游只认 mac80211 和 broadcom 两种。本机的 radio 是 type='mtwifi'，
+#   两个分支都不进，于是列表里只剩下 "无加密" 一项。
+#   —— 参考固件 iniwex 用的是同一份 wireless.js，所以它那边也是同样的表现；
+#      iniwex 是靠另外装 luci-app-mtk 提供的一套 MTK 专用页面来配加密的。
+#
+# 驱动侧本身完全支持。/usr/share/schema/mtwifi/dat-defs.json 的 ENC_2_DAT：
+#       psk / psk2 / psk-mixed / sae / sae-mixed / owe  ->  WPAPSK / WPA2PSK /
+#       WPAPSKWPA2PSK / WPA3PSK / WPA2PSKWPA3PSK / OWE
+#   所以这纯粹是前端的判断漏了一种驱动类型。
+#
+# 修法：在 mac80211 分支之前插一个 mtwifi 分支，**只放 ENC_2_DAT 里真实存在的
+# 那几种**。刻意不照抄 mac80211 分支：那里面还有 WPA-EAP / WPA3-EAP / WEP，
+# 驱动并不认，转换时会静默回落成 OPEN/NONE —— 选得到却不生效，比没有更糟。
+#
+# 口令输入框不受影响：它在公共段，依赖的是 encryption 的取值
+# （owe/psk2/psk-mixed/sae/sae-mixed…），不受 hwtype 判断限制。
+#
+# 幂等、留备份、结构自检失败就回滚。由 /etc/init.d/p3-uipatch 每次开机跑一遍，
+# 这样 apk 升级 luci-mod-network 之后下次重启会自动补上。
+
+F=/www/luci-static/resources/view/network/wireless.js
+MARK=mtwifi_enc_patched
+ANCHOR="const crypto_modes=\[\];if(hwtype=='mac80211')"
+
+[ -f "$F" ] || exit 0
+grep -q "$MARK" "$F" && exit 0
+
+# 锚点必须唯一，否则不动手
+n=$(grep -c "$ANCHOR" "$F")
+if [ "$n" != "1" ]; then
+	logger -t mtwifi-enc "锚点出现 $n 次（应为 1），跳过（luci-mod-network 可能已升级）"
+	exit 0
+fi
+
+before=$(wc -c < "$F")
+
+NEW="const crypto_modes=[];/*${MARK}*/if(hwtype=='mtwifi'){crypto_modes.push(['psk2','WPA2-PSK',35]);crypto_modes.push(['sae','WPA3-SAE',31]);crypto_modes.push(['sae-mixed','WPA2-PSK/WPA3-SAE Mixed Mode',30]);crypto_modes.push(['psk-mixed','WPA-PSK/WPA2-PSK Mixed Mode',22]);crypto_modes.push(['psk','WPA-PSK',12]);crypto_modes.push(['owe','OWE',1]);}else if(hwtype=='mac80211')"
+
+# 分隔符用 |：替换串里有 / （"WPA2-PSK/WPA3-SAE"），不能拿 / 当分隔符
+sed "s|${ANCHOR}|${NEW}|" "$F" > "$F.encnew" || { rm -f "$F.encnew"; exit 1; }
+
+after=$(wc -c < "$F.encnew")
+
+# 结构自检：标记在、原 mac80211 分支被保留成 else if、公共段的 none 还在、
+# 体积增量落在合理区间
+if grep -q "$MARK" "$F.encnew" &&
+   grep -q "else if(hwtype=='mac80211')" "$F.encnew" &&
+   grep -q "crypto_modes.push(\['none'" "$F.encnew" &&
+   [ "$after" -gt "$before" ] && [ $((after - before)) -lt 600 ]; then
+	cat "$F" > "$F.encorig" 2>/dev/null
+	cat "$F.encnew" > "$F"
+	rm -f "$F.encnew"
+	logger -t mtwifi-enc "已给 wireless.js 加上 mtwifi 加密选项（$before -> $after 字节）"
+	exit 0
+fi
+
+logger -t mtwifi-enc "自检未通过，未改动原文件"
+rm -f "$F.encnew"
+exit 1

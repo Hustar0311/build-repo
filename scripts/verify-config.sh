@@ -102,6 +102,30 @@ else
     bad "缺少 21-fzs-p3-wifi —— 无线会配错"
 fi
 
+echo "========== 5b. 无线加密选项（mtwifi 驱动）=========="
+# 上游 wireless.js 的加密下拉框只认 mac80211 / broadcom 两种驱动，
+# 本机的 radio 是 type=mtwifi，两个分支都不进，列表里只会剩"无加密"。
+# 驱动本身是支持的（见 /usr/share/schema/mtwifi/dat-defs.json 的 ENC_2_DAT）。
+ENCP="$W/files/usr/sbin/luci-mtwifi-encryption-patch"
+if [ -f "$ENCP" ]; then
+    ok "files/usr/sbin/luci-mtwifi-encryption-patch"
+else
+    bad "缺少 luci-mtwifi-encryption-patch —— 无线安全页面只会有"无加密""
+fi
+if [ -f "$W/files/etc/init.d/p3-uipatch" ] &&
+   grep -q 'luci-mtwifi-encryption-patch' "$W/files/etc/init.d/p3-uipatch"; then
+    ok "p3-uipatch 服务（开机重打界面补丁，防 apk 升级覆盖）"
+else
+    bad "缺少 p3-uipatch 服务或它没调用无线加密补丁"
+fi
+# 只允许放驱动真正支持的那几种；EAP/WEP 混进来会"选得到但不生效"
+for m in psk2 psk-mixed psk sae sae-mixed owe; do
+    grep -q "'$m'" "$ENCP" 2>/dev/null || bad "无线加密补丁里缺 $m"
+done
+grep -q "'wpa2'\|'wpa3'\|wep-open" "$ENCP" 2>/dev/null &&
+    bad "无线加密补丁混入了 mtwifi 不支持的 EAP/WEP 模式" ||
+    ok "加密候选仅含 ENC_2_DAT 支持的 psk/psk2/psk-mixed/sae/sae-mixed/owe"
+
 echo "========== 6. 机型与镜像格式 =========="
 need_cfg CONFIG_TARGET_mediatek                              "目标 mediatek"
 need_cfg CONFIG_TARGET_mediatek_filogic                      "子目标 filogic"
