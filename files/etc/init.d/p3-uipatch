@@ -22,9 +22,11 @@ wifi_guard() {
 	[ "$(uci -q get wireless.MT7981_1_2.type)" = "mtwifi" ] || return 0
 
 	CHANGED=0
-	# LuCI 无线页面的"工作频率"控件按 mac80211 的能力模型写的，
-	# 对 mtwifi 保存时会把这三个字段清空，射频就停在 Channel 0 / 0 dBm。
-	# 前端已由 luci-mtwifi-encryption-patch 改成只读，这里再兜一道底。
+	# 上游那个"工作频率"控件（CBIWifiFrequencyValue）按 mac80211 的能力模型
+	# 写的，对 mtwifi 保存时会把 band/channel/htmode 一并清空，射频随即停在
+	# Channel 0 / Tx-Power 0 dBm，两个 SSID 都不再开播。
+	# 前端已由 luci-mtwifi-encryption-patch 对 mtwifi 换成一组语义正确的控件，
+	# 这里再兜一道底：缺哪个补哪个，不覆盖用户已经设好的值。
 	ensure_opt MT7981_1_1 band    2g
 	ensure_opt MT7981_1_1 channel auto
 	ensure_opt MT7981_1_1 htmode  HE40

@@ -127,9 +127,20 @@ grep -q "'wpa2'\|'wpa3'\|wep-open" "$ENCP" 2>/dev/null &&
     ok "加密候选仅含 ENC_2_DAT 支持的 psk/psk2/psk-mixed/sae/sae-mixed/owe"
 # 实测踩到的坑：在该页面保存会把 band/channel/htmode 清空，射频停在
 # Channel 0 / 0 dBm，两个 SSID 都不再开播。必须同时有前端只读 + 开机兜底。
-grep -q 'mtwifi_freq_guard' "$ENCP" 2>/dev/null &&
-    ok "频率控件对 mtwifi 只读（防止保存时清空 band/channel/htmode）" ||
-    bad "缺少频率控件只读补丁 —— 在无线页面保存会清空射频配置"
+for mk in mtwifi_enc mtwifi_dev mtwifi_devend; do
+    grep -q "$mk" "$ENCP" 2>/dev/null || bad "无线页面补丁缺少改动标记 $mk"
+done
+grep -q 'mtwifi_devend' "$ENCP" 2>/dev/null &&
+    ok "跳过 mac80211 专用的频率控件，改用 mtwifi 自己的一组设备级控件" ||
+    bad "缺少设备级控件补丁 —— 工作频率/国家代码/高级设置都不可用，且保存会清空射频配置"
+# txpower 在 mtwifi 是百分比不是 dBm，说明文字必须讲清楚，否则用户会当 dBm 填
+grep -q 'percentage, not dBm' "$ENCP" 2>/dev/null &&
+    ok "发射功率标注为百分比（converter.uc 里 txp<100 才置 PERCENTAGEenable）" ||
+    bad "发射功率没有标注为百分比 —— 会被误当成 dBm"
+# 分隔符踩过坑：替换串里同时有 | 和 /，只能用 @
+grep -q 'sed "s@' "$ENCP" 2>/dev/null &&
+    ok "sed 使用 @ 作分隔符（替换串里含 || 与正则 /.../）" ||
+    bad "sed 分隔符可能与替换串冲突，会导致只打进去一半、括号不平衡"
 if grep -q 'ensure_opt MT7981_1_1 band' "$W/files/etc/init.d/p3-uipatch" 2>/dev/null &&
    grep -q 'START=19' "$W/files/etc/init.d/p3-uipatch" 2>/dev/null; then
     ok "p3-uipatch 带 band/channel/htmode 开机兜底，且排在 network(S20) 之前"

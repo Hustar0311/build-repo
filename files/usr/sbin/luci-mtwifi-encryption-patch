@@ -1,92 +1,100 @@
 #!/bin/sh
-# 修 LuCI 无线页面对联发科私有驱动（type=mtwifi）的两处问题。
+# 补上 LuCI 无线页面对联发科私有驱动（type=mtwifi）缺失的支持。
 #
 # 目标文件：/www/luci-static/resources/view/network/wireless.js
 #           （luci-mod-network 提供，已压缩）
+# 可传入第一个参数指定别的文件路径，方便离线校验。
 #
-# ── 问题一：加密方式下拉框只有"无加密" ────────────────────────────
-#   加密候选是这样攒出来的：
+# 上游这个页面基本是围着 mac80211 写的，几乎所有设备级选项都锁在
+# `if (hwtype=='mac80211') { ... }` 里，本机 radio 是 type='mtwifi'，
+# 于是：加密方式只有"无加密"、工作频率不可设、国家代码不可设、
+# 高级设置整个标签页是空的。
+#
+# ── 改动一：加密候选（标记 mtwifi_enc）────────────────────────────
+#   原本：
 #       const crypto_modes=[];
 #       if (hwtype=='mac80211') { ...psk2/psk/psk-mixed/sae/owe/wpa2... }
 #       else if (hwtype=='broadcom') { ...psk2/psk/wep... }
 #       crypto_modes.push(['none','No Encryption',0]);
-#   上游只认 mac80211 和 broadcom。本机 radio 是 type='mtwifi'，两个分支都不进，
-#   只剩公共段那条 none。
-#   驱动侧本身完全支持，见 /usr/share/schema/mtwifi/dat-defs.json 的 ENC_2_DAT。
+#   两个分支都不进，只剩公共段那条 none。
+#   驱动侧其实全支持，见 /usr/share/schema/mtwifi/dat-defs.json 的 ENC_2_DAT。
+#   修法：插一个 mtwifi 分支，**只放 ENC_2_DAT 里真实存在的那几种**。
+#   刻意不照抄 mac80211 分支——那里还有 WPA-EAP / WPA3-EAP / WEP，驱动不认，
+#   转换时会静默回落成 OPEN/NONE，选得到却不生效，比没有更糟。
 #
-#   修法：在 mac80211 分支前插一个 mtwifi 分支，**只放 ENC_2_DAT 里真实存在的
-#   那几种**。刻意不照抄 mac80211 分支——那里还有 WPA-EAP / WPA3-EAP / WEP，
-#   驱动不认，转换时会静默回落成 OPEN/NONE，选得到却不生效，比没有更糟。
+# ── 改动二：设备级选项（标记 mtwifi_dev）──────────────────────────
+#   上游用 CBIWifiFrequencyValue（选项名 _freq）统管 band/channel/htmode，
+#   它按 mac80211 的能力模型写的，对 mtwifi 匹配不上；实测在页面上保存会把
+#   这三个字段一并清空，射频随即停在 Channel 0 / Tx-Power 0 dBm，
+#   两个 SSID 都不再开播。
+#   修法：对 mtwifi 整个跳过 _freq，改成自己给一组语义正确的控件。
 #
-# ── 问题二：在该页面保存会把射频配置清空 ─────────────────────────
-#   页面上的"工作频率"控件 CBIWifiFrequencyValue（选项名 _freq）负责读写
-#   band / channel / htmode 三个字段。它是按 mac80211 的能力模型写的，
-#   对 mtwifi 拿不到匹配的 hwmode/htmode 组合，保存时会把这三个字段一并清掉。
+#   取值语义全部对着 /usr/share/ucode/mtwifi/converter.uc 核过：
+#     channel  "auto" -> AutoChannelSelect=3, Channel=0；否则 Channel=该值
+#     htmode   取其中的数字当带宽（20/40/80/160），含 "HE" 则按 802.11ax 走
+#              calc_wireless_mode(): 2g -> 16(ax)/9,  5g -> 17(ax)/15
+#     txpower  **是百分比，不是 dBm**：txp<100 时 PERCENTAGEenable=1、
+#              TxPower=txp，否则 PERCENTAGEenable=0、TxPower=100
+#              （所以上游那个 dBm 滑杆用在这儿本来就是错的）
+#     country  两位字母，查 defs.COUNTRY_REGIONS（共 101 个），
+#              2g 写 CountryRegion，其余写 CountryRegionABand
+#     noscan   参与 calc_bandwidth：40MHz 时决定 HT_BSSCoexistence
+#     mu_beamformer  ETxBfEnCond=1 / MUTxRxEnable
+#   band 不开放修改：它和 dbdc_main、phy 的配对绑死，改了会错位。
 #
-#   实测后果：uci 里 band/channel/htmode 全没了，驱动停在
-#   Channel 0 / Tx-Power 0 dBm，两个 SSID 都不再开播（页面显示"无线未关联"）。
-#   注意加密本身是写对了的（AuthMode=WPA2PSKWPA3PSK），坏的只是频率这一块。
+#   万一手动指定的信道让射频起不来，SSH 里恢复：
+#       uci set wireless.MT7981_1_2.channel=auto && uci commit wireless && wifi reload
+#   另外 /etc/init.d/p3-uipatch 里还有一道开机兜底，band/channel/htmode
+#   缺了会自动补回。
 #
-#   修法：对 mtwifi 把这个控件改成只读（write/remove 变成空操作），
-#   这样在页面上改 SSID、加密、密码都不会再动到 band/channel/htmode。
-#   代价是 mtwifi 的信道与带宽不能在这个页面上改了——但原本它也改不对，
-#   要改请走 SSH：
-#       uci set wireless.MT7981_1_2.channel=149   # auto 或具体信道
-#       uci set wireless.MT7981_1_2.htmode=HE80
-#       uci commit wireless && wifi reload
-#   另外 /etc/init.d/p3-uipatch 里还有一道开机兜底，万一这三个字段又空了，
-#   下次重启会自动补回来。
-#
-# 两处改动各自带独立标记，互不影响，可分别重复执行。
-# 都有：锚点唯一性检查、备份、结构自检，不通过就不动原文件。
+# 两处改动各带独立标记，互不影响，可分别重复执行；
+# 都有锚点唯一性检查、备份、结构自检，不通过就不动原文件。
 
-F=/www/luci-static/resources/view/network/wireless.js
+F="${1:-/www/luci-static/resources/view/network/wireless.js}"
 [ -f "$F" ] || exit 0
 rc=0
+log() { logger -t mtwifi-ui "$1" 2>/dev/null; echo "  $1"; }
 
-backup_once() {
-	[ -f "$F.encorig" ] || cat "$F" > "$F.encorig" 2>/dev/null
+backup_once() { [ -f "$F.encorig" ] || cat "$F" > "$F.encorig" 2>/dev/null; }
+
+apply() { # 标记 锚点 替换串 自检关键字
+	_m="$1"; _a="$2"; _n="$3"; _c="$4"
+	grep -q "$_m" "$F" && return 0
+	if [ "$(grep -c "$_a" "$F")" != "1" ]; then
+		log "$_m: 锚点不唯一或不存在，跳过（luci-mod-network 可能已升级）"
+		return 0
+	fi
+	# 分隔符用 @：锚点和替换串里都出现过 | 和 /
+	# （替换串里有 uci.get(...)||'2g'，也有正则 /^[A-Za-z][A-Za-z]$/），
+	# 拿 | 或 / 当分隔符会被 sed 当成表达式结束，这个坑踩过一次。
+	sed "s@${_a}@${_n}@" "$F" > "$F.mtnew" || { rm -f "$F.mtnew"; return 1; }
+	if grep -q "$_m" "$F.mtnew" && grep -q "$_c" "$F.mtnew"; then
+		backup_once; cat "$F.mtnew" > "$F"; rm -f "$F.mtnew"
+		log "$_m: 已应用"
+		return 0
+	fi
+	rm -f "$F.mtnew"; log "$_m: 自检未通过，未改动原文件"
+	return 1
 }
 
-# ── 改动一：加密候选 ───────────────────────────────────────────
-MARK1=mtwifi_enc_patched
-A1="const crypto_modes=\[\];if(hwtype=='mac80211')"
-N1="const crypto_modes=[];/*${MARK1}*/if(hwtype=='mtwifi'){crypto_modes.push(['psk2','WPA2-PSK',35]);crypto_modes.push(['sae','WPA3-SAE',31]);crypto_modes.push(['sae-mixed','WPA2-PSK/WPA3-SAE Mixed Mode',30]);crypto_modes.push(['psk-mixed','WPA-PSK/WPA2-PSK Mixed Mode',22]);crypto_modes.push(['psk','WPA-PSK',12]);crypto_modes.push(['owe','OWE',1]);}else if(hwtype=='mac80211')"
+# ── 改动一 ───────────────────────────────────────────────────────
+apply mtwifi_enc \
+"const crypto_modes=\[\];if(hwtype=='mac80211')" \
+"const crypto_modes=[];/*mtwifi_enc*/if(hwtype=='mtwifi'){crypto_modes.push(['psk2','WPA2-PSK',35]);crypto_modes.push(['sae','WPA3-SAE',31]);crypto_modes.push(['sae-mixed','WPA2-PSK/WPA3-SAE Mixed Mode',30]);crypto_modes.push(['psk-mixed','WPA-PSK/WPA2-PSK Mixed Mode',22]);crypto_modes.push(['psk','WPA-PSK',12]);crypto_modes.push(['owe','OWE',1]);}else if(hwtype=='mac80211')" \
+"else if(hwtype=='mac80211')" || rc=1
 
-if ! grep -q "$MARK1" "$F"; then
-	if [ "$(grep -c "$A1" "$F")" = "1" ]; then
-		sed "s|${A1}|${N1}|" "$F" > "$F.new1"
-		if grep -q "$MARK1" "$F.new1" &&
-		   grep -q "else if(hwtype=='mac80211')" "$F.new1" &&
-		   grep -q "crypto_modes.push(\['none'" "$F.new1"; then
-			backup_once; cat "$F.new1" > "$F"; rm -f "$F.new1"
-			logger -t mtwifi-ui "已加上 mtwifi 加密选项"
-		else
-			rm -f "$F.new1"; logger -t mtwifi-ui "加密改动自检未过，跳过"; rc=1
-		fi
-	else
-		logger -t mtwifi-ui "加密锚点不唯一或不存在，跳过（luci-mod-network 可能已升级）"
-	fi
-fi
+# ── 改动二：前半，插入 mtwifi 自己的一组控件，并把 _freq 关进 else ──
+MTBLOCK="if(hwtype=='mtwifi'){/*mtwifi_dev*/var mtb=uci.get('wireless',radioNet.getWifiDeviceName(),'band')||'2g';o=ss.taboption('general',form.ListValue,'channel',_('Channel'));o.value('auto',_('auto'));if(mtb=='2g'){for(var i=1;i<=13;i++)o.value(''+i,''+i);}else{var c5=[36,40,44,48,52,56,60,64,100,104,108,112,116,120,124,128,132,136,140,144,149,153,157,161,165];for(var j=0;j<c5.length;j++){var cc=c5[j];o.value(''+cc,(cc>=52 \&\& cc<=144)?(cc+' (DFS)'):(''+cc));}}o=ss.taboption('general',form.ListValue,'htmode',_('Width'));if(mtb=='2g'){o.value('HE40','HE40 - 802.11ax 40MHz');o.value('HE20','HE20 - 802.11ax 20MHz');o.value('HT40','HT40 - 802.11n 40MHz');o.value('HT20','HT20 - 802.11n 20MHz');}else{o.value('HE160','HE160 - 802.11ax 160MHz');o.value('HE80','HE80 - 802.11ax 80MHz');o.value('HE40','HE40 - 802.11ax 40MHz');o.value('HE20','HE20 - 802.11ax 20MHz');o.value('VHT160','VHT160 - 802.11ac 160MHz');o.value('VHT80','VHT80 - 802.11ac 80MHz');o.value('HT40','HT40 - 802.11n 40MHz');o.value('HT20','HT20 - 802.11n 20MHz');}o=ss.taboption('general',form.Value,'country',_('Country Code'),_('Two letters, for example CN, US, JP, DE, GB. Unknown codes fall back to the driver default.'));o.value('CN','CN');o.value('US','US');o.value('JP','JP');o.value('DE','DE');o.value('GB','GB');o.value('AU','AU');o.value('KR','KR');o.value('TW','TW');o.value('HK','HK');o.value('SG','SG');o.validate=function(sid,v){if(!v)return true;return /^[A-Za-z][A-Za-z]$/.test(v)?true:_('Must be a two letter country code');};o=ss.taboption('general',form.ListValue,'txpower',_('Transmit power'),_('Percentage of the maximum power the driver supports. This driver takes a percentage, not dBm.'));o.value('100','100%');o.value('75','75%');o.value('50','50%');o.value('25','25%');o.value('10','10%');o=ss.taboption('advanced',form.Flag,'noscan',_('Force 40MHz mode'),_('Skip the 20/40MHz coexistence check and always use the configured width.'));o.rmempty=false;o=ss.taboption('advanced',form.Flag,'mu_beamformer',_('Enable beamforming'),_('Turns on MU-MIMO beamforming (ETxBfEnCond).'));o.rmempty=false;}else{"
 
-# ── 改动二：频率控件对 mtwifi 只读 ─────────────────────────────
-MARK2=mtwifi_freq_guard
-A2="reported as such.'));o.ucisection=s.section;"
-N2="reported as such.'));o.ucisection=s.section;/*${MARK2}*/if(hwtype=='mtwifi'){o.write=function(){};o.remove=function(){};}"
+apply mtwifi_dev \
+"o=ss.taboption('general',CBIWifiFrequencyValue,'_freq'" \
+"${MTBLOCK}o=ss.taboption('general',CBIWifiFrequencyValue,'_freq'" \
+"CBIWifiFrequencyValue,'_freq'" || rc=1
 
-if ! grep -q "$MARK2" "$F"; then
-	if [ "$(grep -c "$A2" "$F")" = "1" ]; then
-		sed "s|${A2}|${N2}|" "$F" > "$F.new2"
-		if grep -q "$MARK2" "$F.new2" &&
-		   grep -q "CBIWifiFrequencyValue,'_freq'" "$F.new2"; then
-			backup_once; cat "$F.new2" > "$F"; rm -f "$F.new2"
-			logger -t mtwifi-ui "已把频率控件对 mtwifi 设为只读"
-		else
-			rm -f "$F.new2"; logger -t mtwifi-ui "频率改动自检未过，跳过"; rc=1
-		fi
-	else
-		logger -t mtwifi-ui "频率锚点不唯一或不存在，跳过（luci-mod-network 可能已升级）"
-	fi
-fi
+# ── 改动二：后半，补上 else 分支的收尾大括号 ────────────────────
+apply mtwifi_devend \
+"reported as such.'));o.ucisection=s.section;" \
+"reported as such.'));o.ucisection=s.section;}/*mtwifi_devend*/" \
+"o.ucisection=s.section;}" || rc=1
 
 exit $rc
