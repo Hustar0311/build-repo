@@ -148,9 +148,21 @@ grep -q 'mtwifi_devend' "$ENCP" 2>/dev/null &&
     ok "跳过 mac80211 专用的频率控件，改用 mtwifi 自己的一组设备级控件" ||
     bad "缺少设备级控件补丁 —— 工作频率/国家代码/高级设置都不可用，且保存会清空射频配置"
 # txpower 在 mtwifi 是百分比不是 dBm，说明文字必须讲清楚，否则用户会当 dBm 填
-grep -q 'percentage, not dBm' "$ENCP" 2>/dev/null &&
+grep -q 'percentage of the maximum power, not dBm' "$ENCP" 2>/dev/null &&
     ok "发射功率标注为百分比（converter.uc 里 txp<100 才置 PERCENTAGEenable）" ||
     bad "发射功率没有标注为百分比 —— 会被误当成 dBm"
+# 工作频率拆成 频段/模式/信道/通道宽度 四个下拉，htmode 由模式+宽度组合写回。
+# 两个虚拟选项都必须 forcewrite，否则只改其中一个时另一个的 write 不会被调用，
+# 组合出来的 htmode 就丢了。
+for v in _mtband _mtmode _mtwidth mtCompose; do
+    grep -q "$v" "$ENCP" 2>/dev/null || bad "四段式频率控件缺少 $v"
+done
+[ "$(grep -c 'forcewrite=true' "$ENCP" 2>/dev/null)" = "2" ] &&
+    ok "_mtmode / _mtwidth 均为 forcewrite（只改一个时也能组合出 htmode）" ||
+    bad "_mtmode / _mtwidth 的 forcewrite 不是两处 —— 单独改模式或宽度会丢失"
+grep -q "CBIWifiCountryValue,'country'" "$ENCP" 2>/dev/null &&
+    ok "国家代码复用上游控件（iwinfo countrylist 对 mtwifi 可用，带国家全名）" ||
+    bad "国家代码没有复用上游控件"
 # 分隔符踩过坑：替换串里同时有 | 和 /，只能用 @
 grep -q 'sed "s@' "$ENCP" 2>/dev/null &&
     ok "sed 使用 @ 作分隔符（替换串里含 || 与正则 /.../）" ||
