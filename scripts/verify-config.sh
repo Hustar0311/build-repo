@@ -127,9 +127,23 @@ grep -q "'wpa2'\|'wpa3'\|wep-open" "$ENCP" 2>/dev/null &&
     ok "加密候选仅含 ENC_2_DAT 支持的 psk/psk2/psk-mixed/sae/sae-mixed/owe"
 # 实测踩到的坑：在该页面保存会把 band/channel/htmode 清空，射频停在
 # Channel 0 / 0 dBm，两个 SSID 都不再开播。必须同时有前端只读 + 开机兜底。
-for mk in mtwifi_enc mtwifi_dev mtwifi_devend; do
+for mk in mtwifi_enc mtwifi_dev mtwifi_devend mtwifi_iface; do
     grep -q "$mk" "$ENCP" 2>/dev/null || bad "无线页面补丁缺少改动标记 $mk"
 done
+# 接口级：MAC 过滤、漫游、接口高级设置。这些标签页本身是无条件创建的，
+# 但内容全锁在 mac80211 分支里，对 mtwifi 是空标签页（LuCI 会把空页隐藏）。
+for opt in macfilter maclist ieee80211k isolate ifname dtim_period wpa_group_rekey \
+           uapsd amsdu autoba mumimo_dl mumimo_ul ofdma_dl ofdma_ul hidden wmm twt; do
+    grep -q "'$opt'" "$ENCP" 2>/dev/null || bad "无线页面补丁缺少接口级选项 $opt"
+done
+# rts / frag：上游放在设备级，而 mtwifi 是从接口级读的（c.rts / c.frag），
+# 放错层级就是白设。补丁里必须出现在 mtwifi_iface 块内。
+if sed -n '/mtwifi_iface/,$p' "$ENCP" 2>/dev/null | grep -q "'rts'" &&
+   sed -n '/mtwifi_iface/,$p' "$ENCP" 2>/dev/null | grep -q "'frag'"; then
+    ok "rts / frag 放在接口级（converter.uc 读的是 c.rts / c.frag）"
+else
+    bad "rts / frag 不在接口级 —— mtwifi 读不到，设了不生效"
+fi
 grep -q 'mtwifi_devend' "$ENCP" 2>/dev/null &&
     ok "跳过 mac80211 专用的频率控件，改用 mtwifi 自己的一组设备级控件" ||
     bad "缺少设备级控件补丁 —— 工作频率/国家代码/高级设置都不可用，且保存会清空射频配置"
