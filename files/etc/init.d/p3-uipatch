@@ -1,15 +1,43 @@
 #!/bin/sh /etc/rc.common
-# 开机重打那些针对第三方软件包的界面小补丁。
+# 开机做两件事：
+#   1) 重打针对第三方软件包的界面小补丁（apk 升级会把它们覆盖回去）
+#   2) 兜底检查无线射频配置，缺了就补回来
 #
-# 为什么要每次开机跑：这些补丁改的是软件包自带的文件，一旦用 apk 升级了
-# 对应的包，改动就被覆盖回去了。放在这里，下次重启会自动补上。
-# 每个补丁自身都是幂等的，已经打过就直接返回。
+# START=19：排在 network(S20) 之前，这样补回来的 band/channel/htmode
+# 能赶在 netifd 拉起无线之前生效，不用额外 reload。
 
-START=95
+START=19
+
+# 本机型两个 mtwifi radio 的正确取值，与首启脚本 21-fzs-p3-wifi 保持一致
+ensure_opt() { # 段名 键 值
+	[ -n "$(uci -q get wireless.$1.$2)" ] && return 0
+	uci -q set "wireless.$1.$2=$3"
+	logger -t p3-uipatch "补回 wireless.$1.$2=$3"
+	CHANGED=1
+}
+
+wifi_guard() {
+	# 只在本机这套 mtwifi 配置上生效，别的机型/驱动一律不碰
+	[ "$(uci -q get wireless.MT7981_1_1.type)" = "mtwifi" ] || return 0
+	[ "$(uci -q get wireless.MT7981_1_2.type)" = "mtwifi" ] || return 0
+
+	CHANGED=0
+	# LuCI 无线页面的"工作频率"控件按 mac80211 的能力模型写的，
+	# 对 mtwifi 保存时会把这三个字段清空，射频就停在 Channel 0 / 0 dBm。
+	# 前端已由 luci-mtwifi-encryption-patch 改成只读，这里再兜一道底。
+	ensure_opt MT7981_1_1 band    2g
+	ensure_opt MT7981_1_1 channel auto
+	ensure_opt MT7981_1_1 htmode  HE40
+	ensure_opt MT7981_1_2 band    5g
+	ensure_opt MT7981_1_2 channel auto
+	ensure_opt MT7981_1_2 htmode  HE160
+	[ "$CHANGED" = "1" ] && uci -q commit wireless
+	return 0
+}
 
 start() {
 	[ -x /usr/sbin/luci-mtwifi-encryption-patch ] && /usr/sbin/luci-mtwifi-encryption-patch
-	# QModem 的 AT 端口补丁由 ec200g 服务负责（它要在模组起来之后才有意义），
-	# 这里不重复调用。
+	wifi_guard
+	# QModem 的 AT 端口补丁由 ec200g 服务负责（要等模组起来才有意义），这里不重复。
 	return 0
 }

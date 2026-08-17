@@ -125,6 +125,17 @@ done
 grep -q "'wpa2'\|'wpa3'\|wep-open" "$ENCP" 2>/dev/null &&
     bad "无线加密补丁混入了 mtwifi 不支持的 EAP/WEP 模式" ||
     ok "加密候选仅含 ENC_2_DAT 支持的 psk/psk2/psk-mixed/sae/sae-mixed/owe"
+# 实测踩到的坑：在该页面保存会把 band/channel/htmode 清空，射频停在
+# Channel 0 / 0 dBm，两个 SSID 都不再开播。必须同时有前端只读 + 开机兜底。
+grep -q 'mtwifi_freq_guard' "$ENCP" 2>/dev/null &&
+    ok "频率控件对 mtwifi 只读（防止保存时清空 band/channel/htmode）" ||
+    bad "缺少频率控件只读补丁 —— 在无线页面保存会清空射频配置"
+if grep -q 'ensure_opt MT7981_1_1 band' "$W/files/etc/init.d/p3-uipatch" 2>/dev/null &&
+   grep -q 'START=19' "$W/files/etc/init.d/p3-uipatch" 2>/dev/null; then
+    ok "p3-uipatch 带 band/channel/htmode 开机兜底，且排在 network(S20) 之前"
+else
+    bad "p3-uipatch 缺少射频配置兜底或启动顺序不对"
+fi
 
 echo "========== 6. 机型与镜像格式 =========="
 need_cfg CONFIG_TARGET_mediatek                              "目标 mediatek"
