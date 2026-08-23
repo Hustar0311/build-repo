@@ -65,12 +65,18 @@ mkdir -p "/var/run/qmodem/${SEC}_dir"
 # PPP 只能协商出链路本地地址，DHCPv6 永远拿不到前缀，
 # 结果 LuCI 里会多出一个永远"不存在"的 wwan4g_6 幽灵接口。
 # 若将来换成有 IPv6 的卡，把这里改成 auto 并把 pdp_type 设为 ipv4v6 即可。
+# LCP 探测放宽：EC200G 在 CMUX 上偶发不回 LCP Echo-Reply，而数据面其实是通的
+# （实测强制走 ppp-wwan4g ping 0% 丢包）。原来 interval 20 / failure 3 意味着
+# 只要 60 秒没收到回应就拆链重拨，表现为反复"已连接 / 未连接"跳变。
+# 改用 netifd 自己的 keepalive（格式：失败次数 间隔秒），20 x 30 = 600 秒容忍，
+# 并把 lcp 参数从 pppd_options 里去掉——两处都写的话后者覆盖前者，容易看走眼。
 uci -q batch <<EOF
 set network.$IFACE=interface
 set network.$IFACE.proto='ppp'
 set network.$IFACE.device='$PORT'
 set network.$IFACE.connect='/etc/ppp/ec200g-connect'
-set network.$IFACE.pppd_options='nocrtscts novj novjccomp noccp lcp-echo-interval 20 lcp-echo-failure 3 115200'
+set network.$IFACE.keepalive='20 30'
+set network.$IFACE.pppd_options='nocrtscts novj novjccomp noccp 115200'
 set network.$IFACE.peerdns='1'
 set network.$IFACE.defaultroute='1'
 set network.$IFACE.ipv6='0'

@@ -85,6 +85,19 @@ grep -q 'gsm-hold /dev/gsmtty'           "$INIT" && ok "init 脚本为每条 CMU
                                                  || bad "init 脚本没有通道持有者 —— gsmtty 重开会永久阻塞"
 grep -q 'rm -f /dev/shm/tom_modem_lock_' "$INIT" && ok "init 脚本开机清理 tom_modem 残留互斥锁" \
                                                  || bad "init 脚本没清理 tom_modem 锁 —— 异常退出后 AT 会 futex 死等"
+# 【坑6】设备名 = mux 索引 * 64 + DLCI。上一个 mux 没释放干净就会偏移 64，
+# 写死 gsmtty1/2/3 会误判成"没有 CMUX 通道"，退回 AT 与拨号互斥的直连模式。
+if grep -q "BASE_FILE" "$INIT" && grep -q "newidx" "$INIT"; then
+    ok "init 脚本动态探测 mux 基址（不写死 gsmtty1/2/3）"
+else
+    bad "init 脚本仍写死 gsmtty 编号 —— mux 索引偏移时会退回直连模式"
+fi
+# 【坑7】gsm-hold 必须 exec 成 sleep，不能留继承 fd 的子进程，否则 mux 释放不掉。
+if grep -q "exec sleep" "$W/files/usr/sbin/gsm-hold"; then
+    ok "gsm-hold 以 exec 收尾（不留继承 fd 的子进程，mux 才能被释放）"
+else
+    bad "gsm-hold 仍用 while+sleep —— 子进程会带着 fd 存活，mux 索引每次 +1"
+fi
 if grep -q "qmodem.ec200g.enable_dial=0" "$INIT"; then
     ok "init 脚本每次开机把 QModem 对 ec200g 的拨号关掉（拨号只能有一个主人）"
 else

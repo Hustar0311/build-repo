@@ -1,17 +1,40 @@
 #!/bin/sh
-# 常驻持有一条 CMUX 逻辑通道。
+# 常驻持有一条 CMUX 逻辑通道。用法: gsm-hold <DLCI 序号，如 1/2/3>
 #
 # 为什么必须有这个东西：
-#   内核 n_gsm 的 /dev/gsmttyN 是"带载波语义"的 tty。DLCI 在最后一个使用者
-#   关闭时会被拆掉，DCD 随之落下；下一次 open() 若不带 O_NONBLOCK，就会永远
-#   卡在 tty_port_block_til_ready 等载波。QModem 的 tom_modem 正是阻塞式 open，
+#   内核 n_gsm 的 gsmtty 是"带载波语义"的 tty。DLCI 在最后一个使用者关闭时
+#   会被拆掉，DCD 随之落下；下一次 open() 若不带 O_NONBLOCK，就会永远卡在
+#   tty_port_block_til_ready 等载波。QModem 的 tom_modem 正是阻塞式 open，
 #   于是"第一条 AT 命令能通、之后全部卡死"。
 #   让一个进程从头到尾按住 fd，DLCI 就不会被拆，后来者 open 立刻返回。
 #
-# 用法: gsm-hold /dev/gsmtty2
+# 【坑6】设备名不是固定的 gsmtty1/2/3。
+#   内核按 mux 索引编号：设备名 = mux 索引 * 64 + DLCI。
+#   只有第一个 mux 才是 gsmtty1..63；如果上一个 mux 没被释放，新的就变成
+#   gsmtty65..127（mux 1）、gsmtty129..（mux 2），以此类推。
+#   所以这里不写死名字，改为等 /var/run/ec200g.base 里的基址（由 ec200g
+#   服务在 mux 建好后写入），再拼出真正的设备路径。
+#
+# 【坑7】不要用 `while :; do sleep 3600; done` 收尾。
+#   那样 sleep 是**子进程**并继承了 fd 8，procd 停服务时只杀外层 shell，
+#   sleep 会带着 fd 继续活最多一小时 —— mux 因此一直不被释放，
+#   下次重建就被迫用新的 mux 索引，设备名整体偏移 64，看起来就像
+#   "CMUX 建不起来"。改成 exec 成 sleep：持有 fd 的就是 procd 直接管的
+#   那个进程，杀掉它 fd 立刻释放。
 set -u
-D="${1:?用法: gsm-hold /dev/gsmttyN}"
+DLCI="${1:?用法: gsm-hold <DLCI 序号>}"
+BASE_FILE=/var/run/ec200g.base
 
+n=0
+while [ ! -s "$BASE_FILE" ]; do
+	n=$((n + 1))
+	[ $n -gt 120 ] && exit 1
+	sleep 1
+done
+BASE=$(cat "$BASE_FILE" 2>/dev/null)
+case "$BASE" in ''|*[!0-9]*) exit 1 ;; esac
+
+D="/dev/gsmtty$((BASE + DLCI))"
 n=0
 while [ ! -e "$D" ]; do
 	n=$((n + 1))
@@ -24,4 +47,5 @@ done
 stty -F "$D" clocal raw -echo -crtscts 2>/dev/null
 
 exec 8<> "$D" || exit 1
-while :; do sleep 3600; done
+# 【坑7】exec 成 sleep，不留继承 fd 的子进程
+exec sleep 2000000000

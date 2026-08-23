@@ -40,9 +40,9 @@ MCU_BAUD=57600
 BAUD=115200
 IFACE=wwan4g
 APN=cmnet
-AT_CH=/dev/gsmtty2
-DATA_CH=/dev/gsmtty1
-HOLD_CH="1 2 3"
+PRE_FILE=/var/run/ec200g.pre
+BASE_FILE=/var/run/ec200g.base
+HOLD_DLCI="1 2 3"    # 1=数据面(pppd)  2=AT/短信  3=备用
 
 # ---------- MCU 供电控制 ----------
 # 用 printf 直接拼帧，不依赖任何外部工具
@@ -123,6 +123,11 @@ start_service() {
 	# 不发 AT+CGDCONT：模组出厂就是 IPV4V6/cmnet，够用；
 	# 而且 PDP 已激活时改它会回 CME ERROR。
 
+	# 【坑6】起 gsmmux 之前先记下已有的 gsmtty 节点，之后靠差集算出这次 mux 的基址。
+	rm -f "$BASE_FILE"
+	ls -1 /dev/gsmtty* 2>/dev/null | sed "s|.*/gsmtty||" > "$PRE_FILE"
+	touch "$PRE_FILE"
+
 	if [ -x /usr/sbin/gsmmux ] && grep -q gsm /proc/tty/ldiscs 2>/dev/null; then
 		logger -t ec200g "启用内核 CMUX"
 		procd_open_instance gsmmux
@@ -134,9 +139,9 @@ start_service() {
 
 		# 【坑2】每条通道一个常驻持有者，DLCI 才不会被拆掉
 		local ch
-		for ch in $HOLD_CH; do
+		for ch in $HOLD_DLCI; do
 			procd_open_instance hold$ch
-			procd_set_param command /usr/sbin/gsm-hold /dev/gsmtty$ch
+			procd_set_param command /usr/sbin/gsm-hold $ch
 			procd_set_param respawn 30 5 0
 			procd_close_instance
 		done
@@ -146,34 +151,56 @@ start_service() {
 }
 
 service_started() {
-	local n=0
+	local n=0 newidx BASE ch i pre
 
-	while [ $n -lt 25 ]; do
-		[ -e "$AT_CH" ] && [ -e "$DATA_CH" ] && break
+	# 【坑6】设备名不是固定的 gsmtty1/2/3。
+	# 内核按 mux 索引编号：设备名 = mux 索引 * 64 + DLCI。
+	# 只有第一个 mux 才是 gsmtty1..63；上一个 mux 没被释放干净时，新的会拿到
+	# 索引 1 -> gsmtty65..127、索引 2 -> gsmtty129.. 依此类推。
+	# 之前写死 gsmtty1/2/3，一旦偏移就误判成"没有 CMUX 通道"，退回直连模式，
+	# AT 与拨号互斥，界面上表现为模组反复在已连接/未连接之间跳。
+	# 这里改成：拿"起 gsmmux 之前的节点列表"和现在的做差，最小的新节点就是 DLCI1。
+	while [ $n -lt 40 ]; do
+		# 不用 grep -vxF -f：busybox 上模式文件为空时行为不一致，
+		# 而首次启动时一个 gsmtty 都没有、文件正好是空的。
+		# 读进变量做 case 成员判断，空列表天然正确。
+		pre=" $(echo $(cat "$PRE_FILE" 2>/dev/null)) "
+		newidx=""
+		for i in $(ls -1 /dev/gsmtty* 2>/dev/null | sed "s|.*/gsmtty||" | sort -n); do
+			case "$pre" in *" $i "*) continue ;; esac
+			newidx="$i"; break
+		done
+		[ -n "$newidx" ] && break
 		n=$((n + 1)); sleep 1
 	done
 
-	if [ -e "$AT_CH" ] && [ -e "$DATA_CH" ]; then
+	if [ -n "$newidx" ]; then
+		BASE=$((newidx - 1))
+		echo "$BASE" > "$BASE_FILE"
+		DATA_CH="/dev/gsmtty$((BASE + 1))"
+		AT_CH="/dev/gsmtty$((BASE + 2))"
+		SPARE_CH="/dev/gsmtty$((BASE + 3))"
+		logger -t ec200g "CMUX 通道就绪（mux 基址 $BASE：数据 $DATA_CH / AT $AT_CH）"
+
 		# 保险起见自己也设一遍 clocal，不依赖 gsm-hold 的先后顺序
-		local ch
-		for ch in $HOLD_CH; do
-			stty -F /dev/gsmtty$ch clocal raw -echo -crtscts 2>/dev/null
+		for ch in $HOLD_DLCI; do
+			stty -F "/dev/gsmtty$((BASE + ch))" clocal raw -echo -crtscts 2>/dev/null
 		done
-		logger -t ec200g "CMUX 通道就绪"
+
 		uci -q set network.$IFACE.device="$DATA_CH"
 		uci -q set qmodem.ec200g.at_port="$AT_CH"
 		uci -q set qmodem.ec200g.sms_at_port="$AT_CH"
 		uci -q delete qmodem.ec200g.valid_at_ports
 		uci -q add_list qmodem.ec200g.valid_at_ports="$AT_CH"
-		# gsmtty3 是空闲的备用通道，AT 实测可用，一并登记为有效口；
-		# gsmtty1 故意不登记——它被 pppd 占着跑 PPP 帧，发 AT 不会有回应，
+		# 备用通道 AT 实测可用，一并登记为有效口；
+		# 数据面那条故意不登记——它被 pppd 占着跑 PPP 帧，发 AT 不会有回应，
 		# 页面会把它标成 (invalid)，这正是我们要的提示。
-		uci -q add_list qmodem.ec200g.valid_at_ports='/dev/gsmtty3'
+		uci -q add_list qmodem.ec200g.valid_at_ports="$SPARE_CH"
 		# QModem 的"AT 调试"下拉是从 ports 取的。首刷时这里还是 /dev/ttyS2，
 		# 而 ttyS2 此刻已被 gsmmux 独占，选它发命令只会拿到 EOF。
 		uci -q delete qmodem.ec200g.ports
-		for ch in $HOLD_CH; do
-			uci -q add_list qmodem.ec200g.ports="/dev/gsmtty$ch"
+		for ch in $HOLD_DLCI; do
+			uci -q add_list qmodem.ec200g.ports="/dev/gsmtty$((BASE + ch))"
 		done
 		uci -q commit network
 		uci -q commit qmodem
@@ -182,7 +209,7 @@ service_started() {
 		# 注意：这里只能查进程，绝不能去读 /proc/*/fd/8 —— 那等于读串口，会卡住。
 		n=0
 		while [ $n -lt 20 ]; do
-			pgrep -f "gsm-hold $AT_CH" >/dev/null 2>&1 && break
+			pgrep -f "gsm-hold 2" >/dev/null 2>&1 && break
 			n=$((n + 1)); sleep 1
 		done
 		sleep 3
@@ -196,11 +223,12 @@ service_started() {
 		sleep 3
 	fi
 
-	local i=1
-	while [ $i -le 3 ]; do
-		logger -t ec200g "拉起 $IFACE（第 $i 次）"
+	local w=0
+	local j=1
+	while [ $j -le 3 ]; do
+		logger -t ec200g "拉起 $IFACE（第 $j 次）"
 		ifup "$IFACE"
-		local w=0
+		w=0
 		while [ $w -lt 30 ]; do
 			if ip -4 addr show "ppp-$IFACE" 2>/dev/null | grep -q "inet "; then
 				logger -t ec200g "$IFACE 已连接"
@@ -210,7 +238,7 @@ service_started() {
 			fi
 			w=$((w + 1)); sleep 1
 		done
-		i=$((i + 1)); sleep 5
+		j=$((j + 1)); sleep 5
 	done
 	logger -t ec200g "$IFACE 三次拉起均失败，见 logread"
 }
@@ -218,6 +246,8 @@ service_started() {
 stop_service() {
 	ifdown "$IFACE" 2>/dev/null
 	killall pppd 2>/dev/null
+	# 【坑6/坑7】清掉基址文件，避免下次启动 gsm-hold 读到过期基址。
+	rm -f "$BASE_FILE" "$PRE_FILE"
 }
 
 # 供人工排障：/etc/init.d/ec200g power_cycle
