@@ -13,7 +13,7 @@
 #   /dev/gsmtty2 → QModem 的 AT / 短信
 #   /dev/gsmtty3 → 备用
 #
-# 三个曾经踩过的坑，改动都在下面标了【坑N】：
+# 曾经踩过的坑，改动都在下面标了【坑N】：
 #  【坑1】/dev/ttyS1 默认是 9600。不显式设成 57600，发出去的 MCU 帧全是乱码，
 #         模组根本不上电——表现为"AT 无应答，放弃"。
 #  【坑2】gsmtty 是带载波语义的 tty，最后一个使用者关闭就拆 DLCI。
@@ -24,6 +24,11 @@
 #  【坑4】QModem"AT 调试"的端口下拉框只遍历后端给的 other_ttys，而后端只 glob
 #         ttyUSB/ttyACM/mhi_DUN/wwanNatN，认不得 /dev/gsmttyN，于是本模组
 #         在那个页面上一个可用端口都没有。见 qmodem-atports-patch。
+#  【坑5】QModem 自己也有一套拨号后端。一旦 qmodem.ec200g.enable_dial 被置 1，
+#         modem_dial.sh 会和 netifd 的 pppd 抢同一个模组：它发 AT+CGACT?、
+#         挂断重拨，把 pppd 打断（No response to 3 echo-requests -> Modem hangup），
+#         期间 AT 端口被两个主人轮番占用，SIM 查询超时，界面上就从 READY 变成 MIS。
+#         本机的拨号一律由 netifd(proto=ppp) 负责，所以每次开机强制置 0。
 
 START=50
 STOP=89
@@ -91,6 +96,15 @@ start_service() {
 	# 认不得 CMUX 的 /dev/gsmttyN。补丁是幂等的，每次开机跑一遍，
 	# 这样即使 apk 升级把 qmodem 覆盖回去，下次重启也会自动补上。
 	[ -x /usr/sbin/qmodem-atports-patch ] && /usr/sbin/qmodem-atports-patch
+
+	# 【坑5】拨号只能有一个主人。QModem 的拨号后端一旦被打开（界面上误点、
+	# 或 qmodem.main.enable_dial 的全局默认扩散过来），就会和 pppd 抢模组，
+	# 表现为 PPP 反复掉线重连、SIM 状态在 READY 与 MIS 之间跳。每次开机纠正。
+	if [ "$(uci -q get qmodem.ec200g.enable_dial)" != "0" ]; then
+		uci -q set qmodem.ec200g.enable_dial=0
+		uci -q commit qmodem
+		logger -t ec200g "已关闭 QModem 对 ec200g 的拨号（拨号由 netifd/pppd 负责）"
+	fi
 
 	logger -t ec200g "给板载 Cat 1 模组上电（MCU @${MCU_BAUD}）"
 	modem2_on

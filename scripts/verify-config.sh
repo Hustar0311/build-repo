@@ -85,6 +85,11 @@ grep -q 'gsm-hold /dev/gsmtty'           "$INIT" && ok "init 脚本为每条 CMU
                                                  || bad "init 脚本没有通道持有者 —— gsmtty 重开会永久阻塞"
 grep -q 'rm -f /dev/shm/tom_modem_lock_' "$INIT" && ok "init 脚本开机清理 tom_modem 残留互斥锁" \
                                                  || bad "init 脚本没清理 tom_modem 锁 —— 异常退出后 AT 会 futex 死等"
+if grep -q "qmodem.ec200g.enable_dial=0" "$INIT"; then
+    ok "init 脚本每次开机把 QModem 对 ec200g 的拨号关掉（拨号只能有一个主人）"
+else
+    bad "init 脚本没有强制 enable_dial=0 —— QModem 拨号器会和 pppd 抢模组"
+fi
 grep -q 'qmodem-atports-patch'           "$INIT" && ok "init 脚本每次开机重打 QModem 的 AT 端口补丁（防 apk 升级覆盖）" \
                                                  || bad "init 脚本没调用 qmodem-atports-patch —— AT 调试下拉框里看不到 gsmtty"
 # 生成 other_ttys 的逻辑在系统里有两份，补丁必须两份都覆盖。
