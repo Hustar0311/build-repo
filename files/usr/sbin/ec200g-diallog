@@ -1,0 +1,41 @@
+#!/bin/sh
+# 把 EC200G 的拨号过程喂给 QModem"拨号总览"页面的日志面板。
+#
+# 为什么需要：
+#   页面上的日志来自 controller/qmodem.lua 里的
+#       log_path = /var/run/qmodem/<段名>_dir/dial_log
+#       if fs.access(log_path) then ... end
+#   这个文件只有 QModem 自己的拨号后端（modem_dial.sh）才会写。
+#   本机的 EC200G 由 netifd(proto=ppp) 拨号，QModem 的拨号是关掉的
+#   （两个拨号器抢同一个模组会把 PPP 打断，见 init.d/ec200g 的【坑5】），
+#   于是那个文件永远不存在，页面上就没有 EC200G 的日志标签。
+#
+#   这里不去打开 QModem 的拨号，而是把系统日志里 pppd / ec200g / wwan4g
+#   的行实时抄进那个文件——页面照常显示，拨号权仍然只有 netifd 一家。
+#
+# 由 /etc/init.d/ec200g 以 procd 实例方式拉起，随服务一起停。
+
+SEC=ec200g
+DIR="/var/run/qmodem/${SEC}_dir"
+LOG="$DIR/dial_log"
+KEEP=300          # 文件里最多保留多少行
+TRIM_EVERY=50     # 每写入多少行整理一次
+
+mkdir -p "$DIR" 2>/dev/null
+
+# 先把已有的历史灌进去，页面一打开就有内容，不用干等
+logread 2>/dev/null | grep -E "pppd|ec200g|wwan4g" | tail -n "$KEEP" > "$LOG"
+
+n=0
+logread -f 2>/dev/null | while read -r line; do
+	case "$line" in
+		*pppd*|*ec200g*|*wwan4g*) ;;
+		*) continue ;;
+	esac
+	printf '%s\n' "$line" >> "$LOG"
+	n=$((n + 1))
+	if [ "$n" -ge "$TRIM_EVERY" ]; then
+		n=0
+		tail -n "$KEEP" "$LOG" > "$LOG.t" 2>/dev/null && mv "$LOG.t" "$LOG"
+	fi
+done

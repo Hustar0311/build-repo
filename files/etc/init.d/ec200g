@@ -97,6 +97,10 @@ start_service() {
 	# 这样即使 apk 升级把 qmodem 覆盖回去，下次重启也会自动补上。
 	[ -x /usr/sbin/qmodem-atports-patch ] && /usr/sbin/qmodem-atports-patch
 
+	# 把"拨号总览"里 EC200G 那行的"启用拨号"与"重拨"禁掉——本模组的拨号
+	# 归 netifd，开了 QModem 的拨号会两边抢模组（见下面的【坑5】）。
+	[ -x /usr/sbin/qmodem-ec200g-nodial-patch ] && /usr/sbin/qmodem-ec200g-nodial-patch
+
 	# 【坑5】拨号只能有一个主人。QModem 的拨号后端一旦被打开（界面上误点、
 	# 或 qmodem.main.enable_dial 的全局默认扩散过来），就会和 pppd 抢模组，
 	# 表现为 PPP 反复掉线重连、SIM 状态在 READY 与 MIS 之间跳。每次开机纠正。
@@ -135,6 +139,15 @@ start_service() {
 		procd_set_param respawn 30 10 0
 		procd_set_param stdout 1
 		procd_set_param stderr 1
+		procd_close_instance
+
+		# 把拨号过程喂给 QModem"拨号总览"的日志面板。
+		# 页面的日志来自 /var/run/qmodem/<段名>_dir/dial_log，本来只有 QModem
+		# 自己的拨号后端会写；我们不开它的拨号（见【坑5】），改成把 pppd 的
+		# 日志抄进去，页面照常有内容，拨号权仍只有 netifd 一家。
+		procd_open_instance diallog
+		procd_set_param command /usr/sbin/ec200g-diallog
+		procd_set_param respawn 30 5 0
 		procd_close_instance
 
 		# 【坑2】每条通道一个常驻持有者，DLCI 才不会被拆掉

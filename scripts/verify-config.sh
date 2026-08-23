@@ -92,6 +92,21 @@ if grep -q "BASE_FILE" "$INIT" && grep -q "newidx" "$INIT"; then
 else
     bad "init 脚本仍写死 gsmtty 编号 —— mux 索引偏移时会退回直连模式"
 fi
+# 拨号总览：不开 QModem 拨号也要能看日志，且入口要禁掉。
+for f in usr/sbin/ec200g-diallog usr/sbin/qmodem-ec200g-nodial-patch; do
+    [ -f "$W/files/$f" ] && ok "files/$f" || bad "files/$f 缺失"
+done
+if grep -q "ec200g-diallog" "$INIT" && grep -q "qmodem-ec200g-nodial-patch" "$INIT"; then
+    ok "init 脚本拉起拨号日志喂送，并在开机重打\"启用拨号/重拨\"置灰补丁"
+else
+    bad "init 脚本没接入拨号日志喂送或置灰补丁"
+fi
+NODIAL="$W/files/usr/sbin/qmodem-ec200g-nodial-patch"
+if grep -q "dial_overview.htm" "$NODIAL" && grep -q "dial_overview.lua" "$NODIAL"; then
+    ok "置灰补丁同时覆盖前端(htm 置灰)与后端(lua 兜底)"
+else
+    bad "置灰补丁没有同时覆盖前端与后端 —— 绕过界面仍能开启拨号"
+fi
 # 【坑7】gsm-hold 必须 exec 成 sleep，不能留继承 fd 的子进程，否则 mux 释放不掉。
 if grep -q "exec sleep" "$W/files/usr/sbin/gsm-hold"; then
     ok "gsm-hold 以 exec 收尾（不留继承 fd 的子进程，mux 才能被释放）"

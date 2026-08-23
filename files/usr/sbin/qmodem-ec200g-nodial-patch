@@ -1,0 +1,97 @@
+#!/bin/sh
+# 在 QModem"拨号总览"里把 EC200G 那一行的"启用拨号"复选框与"重拨"按钮禁掉。
+#
+# 为什么：
+#   本机的 EC200G 由 netifd(proto=ppp) 拨号。一旦 QModem 的拨号后端也被打开，
+#   modem_dial.sh 会和 pppd 抢同一个模组：它发 AT+CGACT?、挂断重拨，把 pppd 打断
+#   （日志里 No response to 3 echo-requests -> Modem hangup），
+#   AT 端口同时被两个主人占用，SIM 查询超时，界面上 SIM 就从 READY 掉成 MIS。
+#   详见 /etc/init.d/ec200g 的【坑5】。
+#   把入口关掉，比事后纠正更省事。
+#
+# 两处改动，各自幂等、带标记与备份：
+#   1) view/qmodem/dial_overview.htm  追加一段脚本，把那两个控件置灰。
+#      注意：这两个控件是 LuCI 前端按 data-ui-widget 动态实例化的，
+#      页面解析完时还不存在，所以脚本要轮询等它出现，不能只跑一次。
+#   2) model/cbi/qmodem/dial_overview.lua  后端兜底：即使有人绕过界面提交，
+#      enable_dial 对 ec200g 一律写 0，重拨对 ec200g 直接跳过。
+
+SEC=ec200g
+HTM=/usr/lib/lua/luci/view/qmodem/dial_overview.htm
+LUA=/usr/lib/lua/luci/model/cbi/qmodem/dial_overview.lua
+MARK=ec200g_nodial
+rc=0
+log() { logger -t ec200g-nodial "$1" 2>/dev/null; echo "  $1"; }
+
+# ---------- 1) 前端置灰 ----------
+if [ -f "$HTM" ] && ! grep -q "$MARK" "$HTM"; then
+	cat "$HTM" > "$HTM.nodialorig" 2>/dev/null
+	cat >> "$HTM" <<'JSEOF'
+
+<!-- ec200g_nodial -->
+<script type="text/javascript">
+// EC200G 的拨号由 netifd(proto=ppp) 负责，QModem 不参与：
+// 两个拨号器抢同一个模组会把 PPP 打断，并让 SIM 状态在 READY / MIS 之间跳。
+// 这两个控件是 LuCI 前端动态实例化的，页面解析完时还不存在，所以轮询等它出现。
+(function () {
+	var SEC = 'ec200g';
+	var TIP = '本模组由网络接口 wwan4g (proto=ppp) 拨号，QModem 不参与拨号；' +
+	          '同时开两个拨号器会互相打断。如需改动请在“网络 → 接口”里操作。';
+	function lockOne(el) {
+		if (!el || el.getAttribute('data-ec200g-locked')) return false;
+		el.disabled = true;
+		el.title = TIP;
+		el.style.opacity = '0.5';
+		el.style.cursor = 'not-allowed';
+		el.setAttribute('data-ec200g-locked', '1');
+		return true;
+	}
+	var tries = 0;
+	var timer = setInterval(function () {
+		var cb = document.getElementById('cbid.qmodem.' + SEC + '.enable_dial');
+		var rd = document.getElementById('cbid.qmodem.' + SEC + '._redial');
+		if (cb) { cb.checked = false; lockOne(cb); }
+		lockOne(rd);
+		if ((cb && rd) || ++tries > 60) clearInterval(timer);
+	}, 250);
+})();
+</script>
+JSEOF
+	if grep -q "$MARK" "$HTM"; then
+		log "已给拨号总览加上 EC200G 控件置灰脚本"
+	else
+		cat "$HTM.nodialorig" > "$HTM"; log "前端改动失败，已回滚"; rc=1
+	fi
+fi
+
+# ---------- 2) 后端兜底 ----------
+if [ -f "$LUA" ] && ! grep -q "$MARK" "$LUA"; then
+	A='restart_btn = s:option(Button, "_redial", translate("ReDial"))'
+	if [ "$(grep -cF "$A" "$LUA")" = "1" ]; then
+		cat "$LUA" > "$LUA.nodialorig" 2>/dev/null
+		awk -v mark="$MARK" '
+		index($0, "restart_btn = s:option(Button, \"_redial\", translate(\"ReDial\"))") && !d {
+			print "-- " mark ": EC200G 由 netifd(proto=ppp) 拨号，QModem 不参与。"
+			print "-- 界面上已置灰，这里再兜一道：绕过界面提交也一律按 0 处理。"
+			print "o.write = function(self, section, value)"
+			print "\tif section == \"ec200g\" then value = \"0\" end"
+			print "\treturn Flag.write(self, section, value)"
+			print "end"
+			d = 1
+		}
+		{ print }
+		' "$LUA" > "$LUA.new"
+		# 重拨按钮：对 ec200g 跳过实际动作
+		sed -i 's|^\( *\)sys.call("/etc/init.d/qmodem_network redial "..section.." > /dev/null 2>&1")$|\1if section ~= "ec200g" then sys.call("/etc/init.d/qmodem_network redial "..section.." > /dev/null 2>\&1") end|' "$LUA.new"
+		if grep -q "$MARK" "$LUA.new" && grep -q 'section ~= "ec200g"' "$LUA.new"; then
+			cat "$LUA.new" > "$LUA"; rm -f "$LUA.new"
+			log "已给 dial_overview.lua 加上 EC200G 后端兜底"
+		else
+			rm -f "$LUA.new"; log "后端改动自检未过，未改动原文件"; rc=1
+		fi
+	else
+		log "dial_overview.lua 锚点不唯一或不存在，跳过（qmodem 可能已升级）"
+	fi
+fi
+
+exit $rc
