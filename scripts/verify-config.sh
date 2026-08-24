@@ -117,6 +117,28 @@ fi
 # 页面上信号值成片消失又出现 —— 看着就像模组反复掉线上线。
 # tom_modem 自带的 /dev/shm 锁指望不上：它退出时会 unlink，后到的进程
 # map 到的根本不是同一把锁。
+# 【坑10】禁止在供电时序里发 AT+QPOWD。
+# 手册 13.1 确实要求先优雅关机再断电，模组也确实支持（1 秒就回 POWERED DOWN）。
+# 但实测：QPOWD 之后本板的 MCU **叫不醒它**——modem2 的断/上电帧（与厂商
+# sim_start 用的是同一对：0028/0008 与 3028/0020）连发、断电拉长到 30 秒都无效，
+# 只能整机断电。这等于给固件加了一条"能把 4G 永久打死"的路径。
+if grep -qE 'QPOWD' "$INIT" "$W/files/etc/ppp/ec200g-connect"; then
+    if grep -q '不要在这里加' "$INIT"; then
+        ok "供电时序里没有真的发 QPOWD（只有告诫注释）"
+    else
+        bad "供电时序里出现了 AT+QPOWD —— 实测发完之后 MCU 叫不醒模组，只能整机断电"
+    fi
+else
+    ok "供电时序里没有 AT+QPOWD"
+fi
+# stop_service 在重启/关机路径上，绝不允许出现可能阻塞的串口操作。
+# 【实测】ttyS2 在模组不响应时，`stty -F` 会卡住并空转烧 CPU（烧过 7 分半），
+# 一旦放进 stop_service，restart 会永久僵死，只能 kill -9 救。
+if sed -n '/^stop_service/,/^}/p' "$INIT" | grep -qE 'stty|tom_modem|cat /dev/'; then
+    bad "stop_service 里有串口操作 —— 模组不响应时会把 restart 卡死"
+else
+    ok "stop_service 不碰串口，重启路径不会被模组状态拖住"
+fi
 ATLOCK="$W/files/usr/sbin/qmodem-atlock-patch"
 if grep -q 'flock' "$ATLOCK" && grep -q 'tom_modem.real' "$ATLOCK"; then
     ok "AT 串行化补丁用 flock 包装 tom_modem（按端口分锁）"

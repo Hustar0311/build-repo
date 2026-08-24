@@ -70,7 +70,28 @@ mcu_init() {
 	stty -F "$MCU" $MCU_BAUD clocal raw -echo -crtscts 2>/dev/null
 }
 
-modem2_on()  { mcu_init; mcu_frame 0028 0008; sleep 1; mcu_frame 3028 0020; }
+# 【坑10】不要在这里加"先 AT+QPOWD 优雅关机再切电"。
+# AT 手册 13.1 确实要求先 QPOWD 等 POWERED DOWN 再断电，模组也确实支持
+# （mux 活着时发 AT+QPOWD=1，1 秒就回 OK + POWERED DOWN，实测过）。
+# 但**放进 stop_service 会把重启路径搞挂**，实测两次都翻车：
+#   1) 放 modem2_on 里：那时 BASE_FILE 已删、gsmmux 已停，而 ttyS2 上的
+#      n_gsm 线路规程未必释放，裸写 AT 到不了模组，白等 12 秒超时。
+#   2) 放 stop_service 里（mux 还在，走 DLCI3）：模组一旦已经不响应，
+#      `stty -F /dev/gsmtty3` 会**空转烧 CPU**（实测烧了 7 分半），
+#      stop_service 卡死，两个 restart 一起僵在 do_wait，只能 kill -9 救。
+# stop_service 在重启/关机路径上，**绝不允许有可能挂住**。
+# 收益（保护 NV/flash 免于异常掉电）是长期且不可见的，代价是让最脆弱的
+# 供电时序路径多一个死锁点——不划算。要做的话得先有一个带超时、
+# 不依赖 stty、不会空转的 AT 发送原语。
+
+# 上电前的断电脉冲要够长。
+# 【实测】原来是 sleep 1，在"模组刚被 AT+QPOWD 软关机过"的情况下起不来——
+# 模组 60 秒不应答，三次拨号全失败。QPOWD 之后模组要靠一次真正的 VBAT
+# 掉电才能复位，1 秒不足以放电。人工排障用的 power_cycle 一直用的是 6 秒，
+# 那条路径从来没出过问题，这里对齐成 6 秒。
+# 代价是开机多 5 秒，换来冷启动确定性，值。
+MODEM_OFF_HOLD=6
+modem2_on()  { mcu_init; mcu_frame 0028 0008; sleep $MODEM_OFF_HOLD; mcu_frame 3028 0020; }
 modem2_off() { mcu_init; mcu_frame 0028 0008; }
 
 # 直接用 shell 收发，绕开 tom_modem——上电阶段它的锁和阻塞 open 都是风险
@@ -273,7 +294,7 @@ stop_service() {
 # 供人工排障：/etc/init.d/ec200g power_cycle
 power_cycle() {
 	echo "断电 modem2..."
-	modem2_off; sleep 6
+	modem2_off; sleep $MODEM_OFF_HOLD
 	echo "上电 modem2..."
 	modem2_on
 	echo "完成。等约 20 秒模组启动。"
