@@ -21,6 +21,9 @@
 | 增加 `chat` / `comgt` / `picocom` / `usbutils` 等 | 拨号与事后排障需要；参考固件里没有 |
 | `files/` 覆盖层内的 EC200G 组件 | 上电、CMUX、拨号、QModem 建段 |
 | QModem 机型表加 `ec200g` | 上游 QModem（含 3.2.0）的 ec200 系列只有 `ec200a` |
+| EC200G 保留 QModem 全部丰富信息 | 仅用 `wwan4g` 覆盖会误报的 AT/CGACT 连接状态，名称、固件、SIM、信号、小区等仍走 QModem 原逻辑 |
+| QModem 日志框独立实时更新 | 日志不再等待慢 AT 查询；用 `textarea.value` 刷新，仅在用户位于底部时自动跟随 |
+| 2.4G/5G 启用 AutoBA | 避免 MT7981 驱动持续打印 `HT_AutoBA = 0, disable BA` 淹没系统日志 |
 | 软件源换北大源 | 默认的 vsean 源有 3 个 feed 拉不到；北大源实测 6/6 可用、10583 包 |
 
 **软件包集合与参考固件保持一致**（342 个，逐个从其 apk 数据库提取），只做上述必要增补。
@@ -76,6 +79,8 @@ Actions → `Build ImmortalWrt` → `Run workflow`。
 | `/etc/init.d/ec200g` | 上电、CMUX、拉接口；`/etc/init.d/ec200g power_cycle` 可给模组断电重启 |
 | `/etc/ppp/ec200g-connect` | 拨号脚本 |
 | `/etc/uci-defaults/99-ec200g-qmodem` | QModem 建段；改完重跑一次即可重新应用 |
+| `/usr/sbin/qmodem-ec200g-nodial-patch` | 禁止 QModem 拨号，修正 EC200G 在线状态来源和日志刷新 |
+| `/usr/lib/lua/luci/controller/qmodem.lua`<br>`/usr/lib/lua/luci/view/qmodem/dial_overview.htm` | **整份覆盖** luci-app-qmodem 自带文件：EC200G 的连接状态改读 `wwan4g` 真实状态，日志走独立端点实时刷新。⚠ 这两个文件被冻结在当前 QModem 版本，feed 升级时会被静默盖回旧版；其余同类改动都用的是运行时补丁（幂等 + 锚点检查 + 自检回滚 + 开机重打），建议择机收敛 |
 | `/usr/sbin/gsmmux` | 内核 CMUX 挂载工具 |
 | `/usr/sbin/cmux` | 厂商用户态 cmux，内核 CMUX 出问题时的退路 |
 | `/usr/sbin/sim_start` | 厂商 MCU 工具，可直接控制两个模组的电源 |

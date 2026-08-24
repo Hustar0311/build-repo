@@ -1,5 +1,6 @@
 #!/bin/sh
 # 在 QModem"拨号总览"里把 EC200G 那一行的"启用拨号"复选框与"重拨"按钮禁掉。
+# EC200G 的丰富信息、真实连接状态和独立日志端点由 files/usr/lib/lua/luci/ 覆盖文件提供。
 #
 # 为什么：
 #   本机的 EC200G 由 netifd(proto=ppp) 拨号。一旦 QModem 的拨号后端也被打开，

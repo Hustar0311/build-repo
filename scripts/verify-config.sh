@@ -76,12 +76,22 @@ for f in etc/init.d/ec200g etc/ppp/ec200g-connect etc/uci-defaults/99-ec200g-qmo
          usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold usr/sbin/qmodem-atports-patch; do
     if [ -f "$W/files/$f" ]; then ok "files/$f"; else bad "files/$f 缺失"; fi
 done
+PPP_DEFAULTS="$W/files/etc/uci-defaults/99-ec200g-qmodem"
+# LCP Echo 必须显式禁用：EC200G 在 CMUX 上偶发不回 Echo-Reply，而数据面其实是通的；
+# 且 netifd 在 keepalive 缺省时会回退成激进的 5 x 1 秒。
+if grep -q "keepalive='0 0'" "$PPP_DEFAULTS"; then
+    ok "PPP 显式禁用了会误判的 LCP Echo（keepalive='0 0'）"
+else
+    bad "PPP 没有显式写 keepalive='0 0' —— netifd 会回退成 5 x 1 秒，导致误拆链"
+fi
 # 实机验证过的三条：MCU 波特率、通道常驻持有、开机清理 tom_modem 残留锁。
 # 少任何一条，模组要么不上电，要么第二条 AT 命令起就永久卡死。
 INIT="$W/files/etc/init.d/ec200g"
 grep -q 'stty -F "$MCU" \$MCU_BAUD'      "$INIT" && ok "init 脚本设置了 MCU 串口波特率（ttyS1 默认 9600，不设就发乱码）" \
                                                  || bad "init 脚本没设 MCU 波特率 —— 模组不会上电"
-grep -q 'gsm-hold /dev/gsmtty'           "$INIT" && ok "init 脚本为每条 CMUX 通道拉起常驻持有者" \
+# 注意：holder 现在传的是 DLCI 序号（gsm-hold 1/2/3），不再是设备路径，
+# 因为设备名会随 mux 索引偏移（见【坑6】）。断言要跟着改，否则永远不命中。
+grep -q 'gsm-hold $ch'                "$INIT" && ok "init 脚本为每条 CMUX 通道拉起常驻持有者" \
                                                  || bad "init 脚本没有通道持有者 —— gsmtty 重开会永久阻塞"
 grep -q 'rm -f /dev/shm/tom_modem_lock_' "$INIT" && ok "init 脚本开机清理 tom_modem 残留互斥锁" \
                                                  || bad "init 脚本没清理 tom_modem 锁 —— 异常退出后 AT 会 futex 死等"
@@ -106,6 +116,21 @@ if grep -q "dial_overview.htm" "$NODIAL" && grep -q "dial_overview.lua" "$NODIAL
     ok "置灰补丁同时覆盖前端(htm 置灰)与后端(lua 兜底)"
 else
     bad "置灰补丁没有同时覆盖前端与后端 —— 绕过界面仍能开启拨号"
+fi
+QMODEM_CTRL="$W/files/usr/lib/lua/luci/controller/qmodem.lua"
+QMODEM_VIEW="$W/files/usr/lib/lua/luci/view/qmodem/dial_overview.htm"
+if grep -q "ec200g_rich_status" "$QMODEM_CTRL" &&
+   grep -q "ec200g_log_endpoint" "$QMODEM_CTRL" &&
+   grep -q "ec200g_log_realtime" "$QMODEM_VIEW"; then
+    ok "QModem 保留 EC200G 全部丰富信息，仅覆盖真实连接状态，并独立实时刷新日志"
+else
+    bad "QModem LuCI 覆盖缺丰富信息、真实状态或日志实时刷新标记"
+fi
+if grep -q "default_MT7981_1_1.autoba='1'" "$PPP_DEFAULTS" &&
+   grep -q "default_MT7981_1_2.autoba='1'" "$PPP_DEFAULTS"; then
+    ok "2.4G / 5G 首启时均启用 AutoBA，避免 MT7981 BA 日志风暴"
+else
+    bad "首启默认未同时为两张射频启用 AutoBA"
 fi
 # 【坑7】gsm-hold 必须 exec 成 sleep，不能留继承 fd 的子进程，否则 mux 释放不掉。
 if grep -q "exec sleep" "$W/files/usr/sbin/gsm-hold"; then
