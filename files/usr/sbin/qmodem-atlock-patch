@@ -1,0 +1,124 @@
+#!/bin/sh
+# 串行化同一个串口上的 AT 访问，修 EC200G 在 QModem 页面上"频繁掉线又上线"。
+#
+# 症状：
+#   「模组信息」页里 EC200G 的整块信息（尤其是 RSRP/RSRQ/SINR/RSSI 这几条
+#   信号值）会成片消失又出现，「拨号总览」里的状态行同样忽有忽无，看起来
+#   像模组一直在掉线重连——但 PPP 其实一直是通的，AT 通道也一直是好的。
+#
+# 根因：QModem 对同一个 AT 串口没有任何互斥，而页面上同时有多个轮询器：
+#   * modem_info.htm  XHR.poll(10, action=info)
+#   * modem_info.htm  update_modem_cfg_list() 里 poll(5) -> set cfg_options
+#     -> this.update()，又是一次 action=info
+#     （`if (new_cfg_list != this.modem_cfg_list)` 比的是数组引用，永真，
+#       所以这条每 5 秒都会真的再发一次 info）
+#   * dial_overview.htm  poll(*, modems_dial_overview) -> action=base_info
+#   于是两次 AT 查询经常在时间上重叠。实测直接对撞的结果：
+#       $ 4 个 tom_modem 同时打 /dev/gsmtty2 上的 AT+CGMM
+#       [AT+CGMMEC200GOK] [EC200GOK] [] []      <- 后两个直接拿到空
+#   拿到空的字段会被 QModem 从 JSON 里整条丢掉，页面上那一行/那一块就没了。
+#
+# 为什么偏偏是 EC200G：
+#   RM500U 是 USB，两个 AT 口（ttyUSB2/3），一次查询几毫秒，撞上的窗口极小；
+#   EC200G 只有 CMUX 在 115200 UART 上复用出来的一条 /dev/gsmtty2，
+#   at_port 和 sms_at_port 还是同一个，一次 info 要 0.5~2 秒，窗口大得多。
+#
+# tom_modem 自己那把锁指望不上：
+#   它在 /dev/shm 建 tom_modem_lock_<dev>，但**退出时会 unlink**，
+#   所以后到的进程 map 到的是一个新文件，根本不是同一把锁。
+#   （这也正是【坑3】里"被 SIGKILL 打断就永久锁死"的同一处设计。）
+#
+# 修法：把 /usr/bin/tom_modem 换成一个薄包装，按设备名取 flock 再 exec 真身。
+#   * 锁按端口分，RM500U 和 EC200G 互不排队
+#   * 拿不到锁最多等 20 秒就放弃、照旧裸跑——万一真身在别处卡死，
+#     行为退化成"和打补丁前一样"，绝不会比现在更糟
+#
+# 幂等：重复执行无副作用；apk/opkg 升级把真身盖回来后，下次开机会自动重打。
+# 由 /etc/init.d/ec200g 的 start_service 调用。
+
+MARK=qmodem_atlock_wrapper
+BIN=/usr/bin/tom_modem
+REAL=/usr/bin/tom_modem.real
+TAG=qmodem-atlock
+
+log() { logger -t "$TAG" "$*"; }
+
+is_elf() { [ "$(dd if="$1" bs=1 count=3 skip=1 2>/dev/null)" = "ELF" ]; }
+
+[ -e "$BIN" ] || { log "找不到 $BIN，跳过"; exit 0; }
+
+command -v flock >/dev/null 2>&1 || { log "系统没有 flock，跳过"; exit 0; }
+
+# 已经是包装器：确认真身还在，就算装好了
+if grep -q "$MARK" "$BIN" 2>/dev/null; then
+	if is_elf "$REAL"; then
+		exit 0
+	fi
+	log "包装器在位但 $REAL 不是可执行程序，无法自愈——请重装 tom_modem"
+	exit 1
+fi
+
+# 不是包装器，那必须是原始 ELF，否则不认识、不动它
+is_elf "$BIN" || { log "$BIN 既不是包装器也不是 ELF，跳过"; exit 0; }
+
+cp -f "$BIN" "$REAL" || { log "备份 $BIN -> $REAL 失败，未改动"; exit 1; }
+chmod 0755 "$REAL"
+
+cat > "$BIN.new" <<'WRAP'
+#!/bin/sh
+# qmodem_atlock_wrapper —— 由 /usr/sbin/qmodem-atlock-patch 生成，勿手工编辑。
+# 按 AT 端口加 flock，把同一串口上的 tom_modem 调用排成队。
+REAL=/usr/bin/tom_modem.real
+
+dev=
+prev=
+for a in "$@"; do
+	case "$prev" in
+		-d|--tty_dev) dev="$a"; break ;;
+	esac
+	case "$a" in
+		/dev/*) [ -z "$dev" ] && dev="$a" ;;
+	esac
+	prev="$a"
+done
+
+# 认不出端口就别锁了，原样跑
+[ -n "$dev" ] || exec "$REAL" "$@"
+
+key=$(printf '%s' "$dev" | tr -c 'A-Za-z0-9' '_')
+mkdir -p /var/lock 2>/dev/null
+exec 9>"/var/lock/tom_modem.$key" 2>/dev/null || exec "$REAL" "$@"
+
+i=0
+until flock -n 9; do
+	i=$((i + 1))
+	# 别人卡死也不能把自己搭进去：等够 20 秒就裸跑，
+	# 退化成和打补丁前一样的行为，不会更糟。
+	[ "$i" -ge 20 ] && break
+	sleep 1
+done
+
+exec "$REAL" "$@"
+WRAP
+
+chmod 0755 "$BIN.new"
+
+if ! sh -n "$BIN.new" 2>/dev/null; then
+	rm -f "$BIN.new"
+	log "包装器语法自检没过，未改动 $BIN"
+	exit 1
+fi
+
+mv "$BIN.new" "$BIN" || { log "换入包装器失败，未改动"; exit 1; }
+
+# 自检：不带参数时真身会打 usage，说明这条链路是通的
+# 注意：真身打印的是 argv[0]，此时已经是 tom_modem.real，别死磕原名
+if "$BIN" 2>&1 | grep -q 'Usage: .*tom_modem'; then
+	log "已启用 AT 串口串行化（$BIN -> flock -> $REAL）"
+	exit 0
+fi
+
+cp -f "$REAL" "$BIN"
+chmod 0755 "$BIN"
+log "包装器自检失败，已回滚 $BIN"
+exit 1

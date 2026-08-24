@@ -23,6 +23,7 @@
 | QModem 机型表加 `ec200g` | 上游 QModem（含 3.2.0）的 ec200 系列只有 `ec200a` |
 | EC200G 保留 QModem 全部丰富信息 | 仅用 `wwan4g` 覆盖会误报的 AT/CGACT 连接状态，名称、固件、SIM、信号、小区等仍走 QModem 原逻辑 |
 | QModem 日志框独立实时更新 | 日志不再等待慢 AT 查询；用 `textarea.value` 刷新，仅在用户位于底部时自动跟随 |
+| AT 串口按端口加 flock | QModem 对同一 AT 口没有互斥，页面上三个轮询器同时打 `/dev/gsmtty2`，撞车时 `tom_modem` 返回空、空字段被整条丢出 JSON —— 信号值成片消失又出现，看着像模组反复掉线上线 |
 | 2.4G/5G 启用 AutoBA | 避免 MT7981 驱动持续打印 `HT_AutoBA = 0, disable BA` 淹没系统日志 |
 | 软件源换北大源 | 默认的 vsean 源有 3 个 feed 拉不到；北大源实测 6/6 可用、10583 包 |
 

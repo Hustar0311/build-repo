@@ -73,7 +73,7 @@ for p in chat comgt ppp luci-proto-ppp kmod-usb-serial-option kmod-usb-serial-ww
 done
 echo "  --- files 覆盖层里的 EC200G 组件 ---"
 for f in etc/init.d/ec200g etc/ppp/ec200g-connect etc/uci-defaults/99-ec200g-qmodem \
-         usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold usr/sbin/qmodem-atports-patch; do
+         usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold usr/sbin/qmodem-atports-patch \n         usr/sbin/qmodem-atlock-patch; do
     if [ -f "$W/files/$f" ]; then ok "files/$f"; else bad "files/$f 缺失"; fi
 done
 PPP_DEFAULTS="$W/files/etc/uci-defaults/99-ec200g-qmodem"
@@ -110,6 +110,35 @@ if grep -q "ec200g-diallog" "$INIT" && grep -q "qmodem-ec200g-nodial-patch" "$IN
     ok "init 脚本拉起拨号日志喂送，并在开机重打\"启用拨号/重拨\"置灰补丁"
 else
     bad "init 脚本没接入拨号日志喂送或置灰补丁"
+fi
+# 【坑8】同一个 AT 串口必须串行。EC200G 的 at_port 和 sms_at_port 都是
+# CMUX 上那条 /dev/gsmtty2，而页面上同时有 info(10s)、info 的 5s 重复 update、
+# base_info 三个轮询器。撞车时 tom_modem 会返回空，空字段被整条丢出 JSON，
+# 页面上信号值成片消失又出现 —— 看着就像模组反复掉线上线。
+# tom_modem 自带的 /dev/shm 锁指望不上：它退出时会 unlink，后到的进程
+# map 到的根本不是同一把锁。
+ATLOCK="$W/files/usr/sbin/qmodem-atlock-patch"
+if grep -q 'flock' "$ATLOCK" && grep -q 'tom_modem.real' "$ATLOCK"; then
+    ok "AT 串行化补丁用 flock 包装 tom_modem（按端口分锁）"
+else
+    bad "AT 串行化补丁没有用 flock 包装 tom_modem —— 并发查询会互相吞响应"
+fi
+# 拿不到锁必须能放弃：万一真身在别处卡死，行为要退化成"和打补丁前一样"，
+# 绝不能让所有 AT 查询排在一个死进程后面。
+if grep -q 'flock -n' "$ATLOCK"; then
+    ok "AT 串行化补丁等锁有上限，卡死时退化而不是死等"
+else
+    bad "AT 串行化补丁用的是无限等待的 flock —— 一个卡死进程会拖垮全部 AT 查询"
+fi
+grep -q 'qmodem-atlock-patch' "$INIT" && ok "init 脚本每次开机重打 AT 串行化补丁（防 apk 升级覆盖）"                                      || bad "init 脚本没调用 qmodem-atlock-patch"
+# 拨号日志喂送脚本必须先收掉上一代残留实例：它的主体是 `logread -f | while`，
+# 那个 while 在管道子 shell 里，procd 重启时常漏掉，孤儿会往同一个 dial_log
+# 里重复追加，页面上每条日志出现两遍。
+DIALLOG="$W/files/usr/sbin/ec200g-diallog"
+if grep -q 'kill -9' "$DIALLOG" && grep -q 'SELF=/usr/sbin/ec200g-diallog' "$DIALLOG"; then
+    ok "拨号日志喂送会顶掉上一代残留实例（否则日志每条两遍）"
+else
+    bad "拨号日志喂送没有清理残留实例 —— dial_log 会被多个实例重复追加"
 fi
 NODIAL="$W/files/usr/sbin/qmodem-ec200g-nodial-patch"
 if grep -q "dial_overview.htm" "$NODIAL" && grep -q "dial_overview.lua" "$NODIAL"; then

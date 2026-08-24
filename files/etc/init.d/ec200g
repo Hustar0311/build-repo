@@ -92,6 +92,13 @@ start_service() {
 	# 【坑3】清掉上次残留的 tom_modem 互斥锁
 	rm -f /dev/shm/tom_modem_lock_* 2>/dev/null
 
+	# 【坑8】QModem 对同一个 AT 串口没有互斥，而页面上有好几个轮询器同时打
+	# /dev/gsmtty2（modem_info 的 poll(10) + 每 5 秒一次的 update，
+	# 外加 dial_overview 的 base_info）。两次查询一重叠，后一个 tom_modem
+	# 就拿到空响应，空字段会被整条丢出 JSON——页面上信号值那几行成片消失
+	# 又出现，看着就像模组在反复掉线上线。给 tom_modem 套一层按端口的 flock。
+	[ -x /usr/sbin/qmodem-atlock-patch ] && /usr/sbin/qmodem-atlock-patch
+
 	# 【坑4】QModem 的 AT 调试下拉框只列 ttyUSB/ttyACM/mhi_DUN/wwanNatN，
 	# 认不得 CMUX 的 /dev/gsmttyN。补丁是幂等的，每次开机跑一遍，
 	# 这样即使 apk 升级把 qmodem 覆盖回去，下次重启也会自动补上。
