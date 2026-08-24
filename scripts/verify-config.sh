@@ -139,6 +139,8 @@ if sed -n '/^stop_service/,/^}/p' "$INIT" | grep -qE 'stty|tom_modem|cat /dev/'
 else
     ok "stop_service 不碰串口，重启路径不会被模组状态拖住"
 fi
+# flock 是 AT 串行化补丁的硬依赖：缺了它补丁只会静默跳过，坑 8 会悄悄回来。
+need_cfg "CONFIG_BUSYBOX_CONFIG_FLOCK" "busybox flock（AT 串口串行化补丁的依赖）"
 ATLOCK="$W/files/usr/sbin/qmodem-atlock-patch"
 if grep -q 'flock' "$ATLOCK" && grep -q 'tom_modem.real' "$ATLOCK"; then
     ok "AT 串行化补丁用 flock 包装 tom_modem（按端口分锁）"
