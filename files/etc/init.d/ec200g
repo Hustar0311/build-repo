@@ -42,7 +42,20 @@ IFACE=wwan4g
 APN=cmnet
 PRE_FILE=/var/run/ec200g.pre
 BASE_FILE=/var/run/ec200g.base
-HOLD_DLCI="1 2 3"    # 1=数据面(pppd)  2=AT/短信  3=备用
+# 只持有 AT 通道，**不要持有数据通道 DLCI1**。
+# 【坑2】的持有者机制是为了 tom_modem 的阻塞式 open，那是 AT 通道的问题；
+# pppd 自己用 O_NONBLOCK 打开，不需要持有者。
+# 而按住 DLCI1 会坏事：PPP 应用指导第 5 节说终止 PPP 只有两条路——
+# LCP Terminate-Request，或者 **AT&D2 下把 DTR 由低拉高**（模组实测 &D: 2，
+# 早就配好了）。gsm-hold 按着 DLCI1 的 fd，pppd 退出时 DTR 永远不掉，
+# 模组收不到终止信号，就赖在数据模式里，下次 ATD*99# 必然失败。
+# （Codex 试过的 +++ / ATH 是无效的：文档 4.1.1.2 里 +++ 只是"切到命令模式但
+#   保持 PPP 连接"，本来就不是用来终止连接的。）
+# 实测：改成 "2 3" 后连做 6 轮 ifdown/ifup，6/6 免断电重连成功，
+# Connect script failed 出现 0 次。
+# 代价：gsmtty1 没有持有者之后，用 tom_modem 去探它会阻塞在 open 上
+# （见第 9 节的排查命令注意事项）。pppd 不受影响。
+HOLD_DLCI="2 3"      # 2=AT/短信  3=备用；数据面 DLCI1 交给 pppd 独占
 
 # ---------- MCU 供电控制 ----------
 # 用 printf 直接拼帧，不依赖任何外部工具

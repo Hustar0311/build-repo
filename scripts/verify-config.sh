@@ -117,6 +117,16 @@ fi
 # 页面上信号值成片消失又出现 —— 看着就像模组反复掉线上线。
 # tom_modem 自带的 /dev/shm 锁指望不上：它退出时会 unlink，后到的进程
 # map 到的根本不是同一把锁。
+# 数据通道 DLCI1 不能有持有者。
+# PPP 应用指导第 5 节：终止 PPP 只有 LCP Terminate-Request 或 AT&D2 下拉高 DTR
+# 两条路（模组实测 &D: 2）。gsm-hold 按着 DLCI1 的 fd，pppd 退出时 DTR 不掉，
+# 模组就赖在数据模式里，下次 ATD*99# 必失败。实测改成 "2 3" 后
+# 6 轮 ifdown/ifup 全部免断电重连，Connect script failed 0 次。
+if grep -qE '^HOLD_DLCI="2 3"' "$INIT"; then
+    ok "只持有 AT 通道，数据面 DLCI1 交给 pppd 独占（DTR 才掉得下去）"
+else
+    bad "HOLD_DLCI 持有了数据通道 DLCI1 —— pppd 退出时 DTR 不掉，模组不退出数据模式"
+fi
 # 【坑10】禁止在供电时序里发 AT+QPOWD。
 # 手册 13.1 确实要求先优雅关机再断电，模组也确实支持（1 秒就回 POWERED DOWN）。
 # 但实测：QPOWD 之后本板的 MCU **叫不醒它**——modem2 的断/上电帧（与厂商
