@@ -74,17 +74,36 @@ jobs:
       - name: 更新并安装 feeds
         working-directory: ./openwrt
         run: |
+          set -e
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           # dae 和 daed 在 immortalwrt/packages 和 daede 两个 feed 里都有，
-          # install -a 按 feeds.conf 顺序取先出现的（官方那份）。这里强制
-          # 换成 daede 的版本：luci-app-daede 的那套脚本是按它自己的包布局
-          # 和版本写的，混用官方后端会对不上。
-          ./scripts/feeds install -p daede -f dae daed luci-app-daede
+          # install -a 按 feeds.conf 顺序取先出现的那份（官方的）。
+          #
+          # 这里不能靠 `install -p daede -f` 覆盖 —— 试过，不生效。scripts/feeds
+          # 的 install_src() 里 -f 只对"核心包"（主树 package/ 下的）有意义：
+          #     if (is_core_src($name)) { ...; $override = 1; }
+          #     if ($installed{$name}) { ...; return 0 unless ($override); }
+          # dae 是 feed 包不是核心包，$override 恒为 0，于是只要它已经被装过，
+          # 无论加不加 -f 都直接 return 0 静默跳过。
+          # 所以只能先把官方那份符号链接摘掉，再从 daede 装。
+          rm -rf package/feeds/packages/dae package/feeds/packages/daed
+          # 官方的 luci-app-dae / luci-app-daed 一并摘掉：我们不选它们，而且
+          # 它们依赖的 dae-geoip / daed-geosite 在 daede 的 dae/daed 里不存在，
+          # 留着只会在编译期刷一堆 "dependency does not exist" 的告警。
+          rm -rf package/feeds/luci/luci-app-dae package/feeds/luci/luci-app-daed
+          ./scripts/feeds install -p daede dae daed luci-app-daede
           echo "=== dae/daed/luci-app-daede 的实际来源 ==="
+          fail=0
           for p in dae daed luci-app-daede; do
-            printf '  %-18s -> %s\n' "$p" "$(readlink -f package/feeds/*/$p 2>/dev/null | head -1)"
+            src=$(readlink -f package/feeds/*/$p 2>/dev/null | head -1)
+            printf '  %-18s -> %s\n' "$p" "${src:-未安装}"
+            case "$src" in
+              */feeds/daede/*) ;;
+              *) echo "    ^^ 不是 daede feed，中止"; fail=1 ;;
+            esac
           done
+          [ "$fail" = "0" ]
 
       - name: 注入机型定义
         working-directory: ./openwrt

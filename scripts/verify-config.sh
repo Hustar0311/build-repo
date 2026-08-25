@@ -348,7 +348,16 @@ for p in dae daed luci-app-daede; do
     if [ -n "$link" ] && [ -d "$link" ]; then
         ok "$p 来自 daede feed"
     else
-        bad "$p 不是从 daede feed 装的 —— feeds install -p daede -f 没生效"
+        bad "$p 没从 daede feed 装上 —— build.yml 里摘官方符号链接那步没生效"
+    fi
+done
+# 官方那份必须已经被摘掉。scripts/feeds 的 install_src() 对已装的 feed 包
+# 直接 return 0（-f 只管核心包），留着的话 daede 那份根本装不进来。
+for l in package/feeds/packages/dae package/feeds/packages/daed          package/feeds/luci/luci-app-dae package/feeds/luci/luci-app-daed; do
+    if [ -e "$l" ]; then
+        bad "$l 还在 —— 它会挡住 daede 的同名包"
+    else
+        ok "${l#package/feeds/} 已摘掉"
     fi
 done
 # CO-RE 的 eBPF 要在运行时读 /sys/kernel/btf/vmlinux，没有 BTF 就是加载即失败。
