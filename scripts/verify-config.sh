@@ -325,6 +325,78 @@ else
     bad "缺少 30-zram 或没写死 32 MiB —— 会按 MemTotal/2 开出一百多 MiB"
 fi
 
+echo "========== 5e. dae / daed 透明代理 =========="
+for p in dae dae-geoip dae-geosite luci-app-dae luci-i18n-dae-zh-cn \
+         daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn \
+         v2ray-geoip v2ray-geosite kmod-xdp-sockets-diag; do
+    need_cfg "CONFIG_PACKAGE_$p" "$p"
+done
+# CO-RE 的 eBPF 要在运行时读 /sys/kernel/btf/vmlinux，没有 BTF 就是加载即失败。
+# REDUCED 是重点：它默认 y（因为我们不是 buildbot），而 BTF depends on !REDUCED，
+# 不显式关掉的话 defconfig 会静默把 BTF 连同 dae/daed 一起丢掉。
+need_cfg CONFIG_KERNEL_DEBUG_INFO     "内核带调试信息（BTF 的前置）"
+need_cfg CONFIG_KERNEL_DEBUG_INFO_BTF "内核 BTF 类型信息"
+need_cfg CONFIG_KERNEL_BPF_EVENTS     "BPF kprobe/tracepoint 支持"
+need_cfg CONFIG_KERNEL_XDP_SOCKETS    "XDP sockets"
+if grep -q "^CONFIG_KERNEL_DEBUG_INFO_REDUCED=y" .config; then
+    bad "KERNEL_DEBUG_INFO_REDUCED 被打开了 —— BTF 会被踢掉，dae/daed 装不上"
+else
+    ok "KERNEL_DEBUG_INFO_REDUCED 已关（BTF 的硬前提）"
+fi
+# @HAS_BPF_TOOLCHAIN 是 dae/daed 的硬依赖；它为假时 defconfig 会静默丢包。
+# 上面的 need_cfg 会先报出来，这里补一句原因，省得对着 .config 猜。
+if grep -q "^CONFIG_HAS_BPF_TOOLCHAIN=y" .config; then
+    ok "BPF 工具链可用（$(grep -o '^CONFIG_BPF_TOOLCHAIN_[A-Z_]*=y' .config | head -1)）"
+else
+    bad "没有可用的 BPF 工具链 —— dae/daed 会被 defconfig 静默丢掉"
+fi
+
+echo "========== 5f. 上行跃点与 mwan3 =========="
+MET="$W/files/usr/sbin/p3-uplink-metrics"
+V6P="$W/files/usr/sbin/qmodem-v6dev-patch"
+MW="$W/files/etc/uci-defaults/42-mwan3"
+for f in "$MET" "$V6P" "$MW"; do
+    if [ -f "$f" ]; then ok "${f#$W/}"; else bad "${f#$W/} 缺失"; fi
+done
+# 跃点：有线 10 < 5G 20 < 4G 30，数字小的优先。
+if grep -q "^WIRED_METRIC=10$" "$MET" 2>/dev/null &&
+   grep -q "^CELL5G_METRIC=20$" "$MET" 2>/dev/null &&
+   grep -q "^CELL4G_METRIC=30$" "$MET" 2>/dev/null; then
+    ok "上行跃点 有线10 / 5G20 / 4G30"
+else
+    bad "p3-uplink-metrics 里的跃点不是 10/20/30"
+fi
+# 5G 的跃点必须落到 qmodem 段上，只改 network 会被下一次拨号覆盖回去。
+grep -q 'qmodem\.\$sec\.metric' "$MET" 2>/dev/null &&
+    ok "5G 跃点写进 qmodem 段（否则每次拨号都被 modem_dial.sh 覆盖）" ||
+    bad "5G 跃点没写进 qmodem 段 —— 拨一次号就丢"
+# 开机守护里要真的调用这两个脚本，否则文件在也白搭。
+UIP="$W/files/etc/init.d/p3-uipatch"
+for s in qmodem-v6dev-patch p3-uplink-metrics; do
+    grep -q "$s" "$UIP" 2>/dev/null && ok "p3-uipatch 调用了 $s" ||
+        bad "p3-uipatch 没调用 $s"
+done
+# mwan3：成员名与探测 IP 是明确要求的，逐个卡死。
+for m in m1w3 m1w3v6 m2w3 m2w3v6 m3w3; do
+    grep -q "add_member $m " "$MW" 2>/dev/null && ok "mwan3 成员 $m" ||
+        bad "mwan3 缺成员 $m"
+done
+for ip in 223.5.5.5 223.6.6.6; do
+    grep -q "$ip" "$MW" 2>/dev/null && ok "mwan3 v4 探测 IP $ip" ||
+        bad "mwan3 缺 v4 探测 IP $ip"
+done
+for ip in "2400:3200::1" "2402:4e00::" "2400:da00::6666"; do
+    grep -q "$ip" "$MW" 2>/dev/null && ok "mwan3 v6 探测 IP $ip" ||
+        bad "mwan3 缺 v6 探测 IP $ip"
+done
+for i in wan wan6 2_1 2_1v6 wwan4g; do
+    grep -q "add_iface $i " "$MW" 2>/dev/null && ok "mwan3 接口 $i" ||
+        bad "mwan3 缺接口 $i"
+done
+grep -q "use_policy='failover'" "$MW" 2>/dev/null &&
+    ok "默认规则指向 failover 策略" ||
+    bad "默认规则没指向 failover"
+
 echo "========== 6. 机型与镜像格式 =========="
 need_cfg CONFIG_TARGET_mediatek                              "目标 mediatek"
 need_cfg CONFIG_TARGET_mediatek_filogic                      "子目标 filogic"

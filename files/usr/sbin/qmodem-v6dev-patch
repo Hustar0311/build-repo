@@ -1,0 +1,96 @@
+#!/bin/sh
+# 把 QModem 生成的 IPv6 接口从别名 @<v4 接口名> 改成绑真实网卡。
+#
+# 为什么：
+#   modem_dial.sh 建 v6 接口时写的是
+#       uci set network.${interface6_name}.ifname="@${interface_name}"
+#       uci set network.${interface6_name}.device="@${interface_name}"
+#   本机 5G 模组上这条别名不工作：2_1v6 挂在 @2_1 上时 odhcp6c 拿不到
+#   地址和前缀，手工把它改成 usb0 就正常。别名要等 v4 接口先 up 再解析出
+#   L3 设备，而模组这条链路上 v4 起来的时机和 RA/DHCPv6 到达的时机对不上。
+#
+# 改在哪：
+#   不能在"创建接口"那段就写真实网卡 —— 那时 target_netcard 还没算出来。
+#   所以在 set_if() 末尾、uci commit 之前补一段：v6 接口存在且网卡已知时，
+#   把 ifname/device 一起纠正过来。这段每次拨号都会跑，幂等。
+#   同时把创建分支里那两行别名赋值删掉，免得中间态写进 uci 又被改回来。
+#
+# 幂等：认标记 p3_v6dev，打过就跳过。原文件备份到 .v6devorig。
+
+F=/usr/share/qmodem/modem_dial.sh
+MARK=p3_v6dev
+log() { logger -t qmodem-v6dev "$1" 2>/dev/null; echo "  $1"; }
+
+[ -f "$F" ] || { log "$F 不存在，跳过"; exit 0; }
+grep -q "$MARK" "$F" && { log "补丁已在，跳过"; exit 0; }
+
+# 两个锚点都必须在，否则说明上游改过结构，宁可不打也不要打歪
+grep -q 'uci set network.${interface6_name}.device="@${interface_name}"' "$F" || {
+	log "找不到别名赋值行，上游可能已自行修复，跳过"; exit 0; }
+grep -q '^    if \[ "$bridge_qmodem_dirty" -eq 1 \]; then$' "$F" || {
+	log "找不到 commit 前的锚点，跳过"; exit 1; }
+
+cat "$F" > "$F.v6devorig" 2>/dev/null
+
+awk '
+	# 1) 删掉创建分支里的两行别名赋值
+	index($0, "uci set network.${interface6_name}.ifname=\"@${interface_name}\"") { next }
+	index($0, "uci set network.${interface6_name}.device=\"@${interface_name}\"") {
+		print "            # p3_v6dev: 别名 @${interface_name} 在本机不工作，"
+		print "            # 真实网卡在 set_if() 末尾统一绑定。"
+		next
+	}
+	# 2) 在 commit 之前补上纠正逻辑
+	/^    if \[ "\$bridge_qmodem_dirty" -eq 1 \]; then$/ && !done {
+		print "    # ---- p3_v6dev ----"
+		print "    # v6 接口绑真实网卡，而不是别名 @$interface_name。"
+		print "    if [ \"$env6\" = \"1\" ] && [ -n \"$target_netcard\" ] &&"
+		print "       [ -n \"$interface6_name\" ] &&"
+		print "       [ -n \"$(uci -q get network.${interface6_name})\" ]; then"
+		print "        if [ \"$(uci -q get network.${interface6_name}.device)\" != \"$target_netcard\" ] ||"
+		print "           [ \"$(uci -q get network.${interface6_name}.ifname)\" != \"$target_netcard\" ]; then"
+		print "            uci set network.${interface6_name}.ifname=\"${target_netcard}\""
+		print "            uci set network.${interface6_name}.device=\"${target_netcard}\""
+		print "            interface_update_flag=1"
+		print "            m_debug \"p3_v6dev: bind $interface6_name to $target_netcard\""
+		print "        fi"
+		print "    fi"
+		print ""
+		done = 1
+	}
+	{ print }
+' "$F" > /tmp/.v6dev.$$ || { log "awk 失败，保持原文件"; rm -f /tmp/.v6dev.$$; exit 1; }
+
+# 改完必须还是合法脚本，否则整个拨号链路都会挂
+if sh -n /tmp/.v6dev.$$ 2>/dev/null && grep -q "$MARK" /tmp/.v6dev.$$; then
+	cat /tmp/.v6dev.$$ > "$F"
+	log "已把 v6 接口从别名改为绑真实网卡"
+else
+	log "生成的文件语法不过或没打上标记，放弃"
+	rm -f /tmp/.v6dev.$$
+	exit 1
+fi
+rm -f /tmp/.v6dev.$$
+
+# 已经建好的接口就地纠正一次，不用等下一次拨号
+CHANGED=0
+for s in $(uci -q show network | sed -n "s/^network\.\([^.]*\)=interface$/\1/p"); do
+	dev=$(uci -q get network.$s.device)
+	case "$dev" in
+		"@"*) ;;
+		*) continue ;;
+	esac
+	base=${dev#@}
+	real=$(uci -q get network.$base.device)
+	# 只动模组建出来的那些（v4 那头是 QModem 写的 modem_config）
+	[ -n "$(uci -q get network.$base.modem_config)" ] || continue
+	[ -n "$real" ] || continue
+	case "$real" in "@"*) continue ;; esac
+	uci -q set network.$s.ifname="$real"
+	uci -q set network.$s.device="$real"
+	log "接口 $s: $dev -> $real"
+	CHANGED=1
+done
+[ "$CHANGED" = "1" ] && uci -q commit network
+
+exit 0

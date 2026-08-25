@@ -1,0 +1,61 @@
+#!/bin/sh
+# 三条上行的路由跃点：有线 10 < 5G 20 < 4G 30。数字小的优先。
+#
+# 为什么要每次开机跑，而不是写成一次性的 uci-defaults：
+#   5G 模组的接口（2_1 / 2_1v6）由 QModem 扫描槽位后自动建段，首启时
+#   /etc/config/qmodem 里还没有那个段，uci-defaults 那一趟根本改不到它。
+#   放在开机守护里，段一出现下次开机就会被纠正，之后一直保持。
+#
+# 5G 的跃点必须写进 qmodem 配置而不是只写 network：modem_dial.sh 每次拨号
+# 都会用 qmodem.<段>.metric 覆盖 network.<接口>.metric，只改后者留不住。
+
+WIRED_METRIC=10
+CELL5G_METRIC=20
+CELL4G_METRIC=30
+
+CHANGED=0
+log() { logger -t p3-uplink-metrics "$1" 2>/dev/null; }
+
+set_opt() { # 配置.段.键 期望值
+	[ "$(uci -q get "$1")" = "$2" ] && return 0
+	uci -q set "$1=$2" || return 1
+	log "$1 = $2"
+	CHANGED=1
+}
+
+# ---------- 有线 ----------
+for i in wan wan6; do
+	[ "$(uci -q get network.$i)" = "interface" ] || continue
+	set_opt network.$i.metric "$WIRED_METRIC"
+done
+
+# ---------- 4G（EC200G / ppp）----------
+# 首启时由 99-ec200g-qmodem 建好并写成 30，这里只是每次开机兜底。
+[ "$(uci -q get network.wwan4g)" = "interface" ] &&
+	set_opt network.wwan4g.metric "$CELL4G_METRIC"
+[ -n "$(uci -q get qmodem.ec200g)" ] &&
+	set_opt qmodem.ec200g.metric "$CELL4G_METRIC"
+
+# ---------- 5G 模组 ----------
+# 段名由 QModem 按槽位生成（本机是 2_1），不写死；除了 ec200g 之外的
+# modem-device 段都当作 5G 模组处理，换槽位/换模组都不用改这个脚本。
+for sec in $(uci -q show qmodem | sed -n "s/^qmodem\.\([^.]*\)=modem-device$/\1/p"); do
+	[ "$sec" = "ec200g" ] && continue
+	set_opt qmodem.$sec.metric "$CELL5G_METRIC"
+
+	# 接口名 = alias（若有且不是 "-"），否则就是段名。与 modem_dial.sh 一致。
+	iface=$(uci -q get qmodem.$sec.alias)
+	case "$iface" in
+		""|"-") iface="$sec" ;;
+	esac
+	for i in "$iface" "${iface}v6"; do
+		[ "$(uci -q get network.$i)" = "interface" ] || continue
+		set_opt network.$i.metric "$CELL5G_METRIC"
+	done
+done
+
+if [ "$CHANGED" = "1" ]; then
+	uci -q commit network
+	uci -q commit qmodem
+fi
+exit 0

@@ -1,0 +1,100 @@
+#!/bin/sh
+# 按本机三条上行重建 mwan3 配置。
+#
+# 出厂配置里只有 wan / wanb 这套模板，跟本机实际接入不对应：
+#   有线      wan   / wan6      跃点 10  →  成员 m1w3   / m1w3v6
+#   5G 模组   2_1   / 2_1v6     跃点 20  →  成员 m2w3   / m2w3v6
+#   4G 模组   wwan4g            跃点 30  →  成员 m3w3
+# 成员名里的 mN 就是 mwan3 的 metric（小的优先），wN 是同级内的权重，
+# 和上面的接口跃点是同一个优先级顺序，两边别写反。
+#
+# 4G 那条只有 v4：运营商对这张贴片卡不下发 IPv6（见 99-ec200g-qmodem 的注释），
+# 所以没有 m3w3v6。
+#
+# 只在 uci-defaults 里跑一次，不做成开机守护 —— 这份配置是给人在 LuCI 上
+# 继续调的，每次开机覆盖回去会把用户的改动吃掉。
+
+[ "$(board_name 2>/dev/null || cat /tmp/sysinfo/board_name 2>/dev/null)" = "fzs,5gcpe-p3" ] || exit 0
+[ -f /etc/config/mwan3 ] || exit 0
+
+TRACK4="223.5.5.5 223.6.6.6"
+TRACK6="2400:3200::1 2402:4e00:: 2400:da00::6666"
+
+# ---------- 先清空模板留下的段 ----------
+# 逐类删干净再重建，避免出厂的 wanb / wanb6 / balanced 这些残留在界面上，
+# 指向不存在的接口，把 mwan3 的状态页搞得看不懂。
+for t in rule policy member interface; do
+	for s in $(uci -q show mwan3 | sed -n "s/^mwan3\.\([^.]*\)=$t\$/\1/p"); do
+		uci -q delete mwan3.$s
+	done
+done
+
+add_iface() { # 段名 协议族 跟踪IP列表
+	uci -q set mwan3.$1=interface
+	uci -q set mwan3.$1.enabled='1'
+	uci -q set mwan3.$1.family="$2"
+	uci -q delete mwan3.$1.track_ip
+	for ip in $3; do
+		uci -q add_list mwan3.$1.track_ip="$ip"
+	done
+	# reliability=1：两三个探测 IP 里有一个通就算这条线在。设成 2 的话，
+	# 单个 DNS 抽风就会把整条上行判死，移动网络上会反复切换。
+	uci -q set mwan3.$1.reliability='1'
+	uci -q set mwan3.$1.count='1'
+	uci -q set mwan3.$1.timeout='4'
+	uci -q set mwan3.$1.interval='10'
+	uci -q set mwan3.$1.down='5'
+	uci -q set mwan3.$1.up='5'
+}
+
+add_member() { # 段名 接口 metric weight
+	uci -q set mwan3.$1=member
+	uci -q set mwan3.$1.interface="$2"
+	uci -q set mwan3.$1.metric="$3"
+	uci -q set mwan3.$1.weight="$4"
+}
+
+add_policy() { # 段名 成员...
+	local name="$1"; shift
+	uci -q set mwan3.$name=policy
+	uci -q delete mwan3.$name.use_member
+	for m in "$@"; do
+		uci -q add_list mwan3.$name.use_member="$m"
+	done
+}
+
+uci -q set mwan3.globals=globals
+uci -q set mwan3.globals.mmx_mask='0x3F00'
+
+add_iface wan    ipv4 "$TRACK4"
+add_iface wan6   ipv6 "$TRACK6"
+add_iface 2_1    ipv4 "$TRACK4"
+add_iface 2_1v6  ipv6 "$TRACK6"
+add_iface wwan4g ipv4 "$TRACK4"
+
+add_member m1w3   wan    1 3
+add_member m1w3v6 wan6   1 3
+add_member m2w3   2_1    2 3
+add_member m2w3v6 2_1v6  2 3
+add_member m3w3   wwan4g 3 3
+
+# 默认策略是故障转移：有线断了走 5G，5G 也断了走 4G。
+# 同一个策略里混 v4/v6 成员是 mwan3 的正常用法（出厂的 balanced 也这么写），
+# 规则上的 family 决定实际用哪一组。
+add_policy failover      m1w3 m2w3 m3w3 m1w3v6 m2w3v6
+add_policy wired_only    m1w3 m1w3v6
+add_policy mobile5g_only m2w3 m2w3v6
+add_policy mobile4g_only m3w3
+
+uci -q set mwan3.default_rule_v4=rule
+uci -q set mwan3.default_rule_v4.dest_ip='0.0.0.0/0'
+uci -q set mwan3.default_rule_v4.family='ipv4'
+uci -q set mwan3.default_rule_v4.use_policy='failover'
+
+uci -q set mwan3.default_rule_v6=rule
+uci -q set mwan3.default_rule_v6.dest_ip='::/0'
+uci -q set mwan3.default_rule_v6.family='ipv6'
+uci -q set mwan3.default_rule_v6.use_policy='failover'
+
+uci -q commit mwan3
+exit 0

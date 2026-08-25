@@ -1,7 +1,9 @@
 #!/bin/sh /etc/rc.common
-# 开机做两件事：
+# 开机做四件事：
 #   1) 重打针对第三方软件包的界面小补丁（apk 升级会把它们覆盖回去）
 #   2) 兜底检查无线射频配置，缺了就补回来
+#   3) 把 QModem 建的 IPv6 接口从别名改成绑真实网卡
+#   4) 校正三条上行的路由跃点（有线 10 < 5G 20 < 4G 30）
 #
 # START=19：排在 network(S20) 之前，这样补回来的 band/channel/htmode
 # 能赶在 netifd 拉起无线之前生效，不用额外 reload。
@@ -40,6 +42,15 @@ wifi_guard() {
 start() {
 	[ -x /usr/sbin/luci-mtwifi-encryption-patch ] && /usr/sbin/luci-mtwifi-encryption-patch
 	wifi_guard
+
+	# QModem 把 v6 接口的 device 写成别名 @<v4 接口名>，本机 5G 模组上
+	# odhcp6c 靠这条别名拿不到地址和前缀。补丁幂等，每次开机重打一遍，
+	# 这样 apk 升级把 modem_dial.sh 覆盖回去也能自动纠正。
+	[ -x /usr/sbin/qmodem-v6dev-patch ] && /usr/sbin/qmodem-v6dev-patch
+
+	# 三条上行的跃点。放在 START=19 是为了赶在 network(S20) 之前写好，
+	# netifd 一起来就是对的，不用事后 reload。
+	[ -x /usr/sbin/p3-uplink-metrics ] && /usr/sbin/p3-uplink-metrics
 	# QModem 的 AT 端口补丁由 ec200g 服务负责（要等模组起来才有意义），这里不重复。
 	return 0
 }
