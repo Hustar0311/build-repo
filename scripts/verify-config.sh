@@ -306,6 +306,25 @@ for p in kmod-sched-core kmod-sched-bpf kmod-veth; do
     need_cfg "CONFIG_PACKAGE_$p" "$p（daed 依赖）"
 done
 
+echo "========== 5d. zram 交换分区 =========="
+for p in kmod-zram zram-swap kmod-lib-lzo; do
+    need_cfg "CONFIG_PACKAGE_$p" "$p"
+done
+need_cfg CONFIG_KERNEL_ZRAM_BACKEND_LZO   "zram 的 lzo/lzo-rle 压缩后端"
+need_cfg CONFIG_KERNEL_ZRAM_DEF_COMP_LZORLE "zram 默认压缩算法 lzo-rle"
+# 这几个 applet 缺了不会报错，只会开机后静默没有 swap。
+for b in MKSWAP SWAPON SWAPOFF FEATURE_SWAPON_DISCARD FEATURE_SWAPON_PRI; do
+    need_cfg "CONFIG_BUSYBOX_CONFIG_$b" "busybox $b（zram init 脚本要用）"
+done
+# 不写 UCI 的话 init 脚本按 MemTotal/2 估，本机会开到一百多 MiB。
+ZRAMD="$W/files/etc/uci-defaults/30-zram"
+if [ -f "$ZRAMD" ] && grep -q "zram_size_mb='32'" "$ZRAMD" &&
+   grep -q "zram_comp_algo='lzo-rle'" "$ZRAMD"; then
+    ok "30-zram 把 zram 固定为 32 MiB / lzo-rle"
+else
+    bad "缺少 30-zram 或没写死 32 MiB —— 会按 MemTotal/2 开出一百多 MiB"
+fi
+
 echo "========== 6. 机型与镜像格式 =========="
 need_cfg CONFIG_TARGET_mediatek                              "目标 mediatek"
 need_cfg CONFIG_TARGET_mediatek_filogic                      "子目标 filogic"

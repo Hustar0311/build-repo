@@ -1,0 +1,15 @@
+#!/bin/sh
+
+# zram-swap 的 init 脚本在 UCI 没给值时按 MemTotal/2 估 zram 大小，本机 256MB
+# 会开到一百多 MiB。zram 的压缩页占的仍是物理内存，池子开太大反而更容易 OOM，
+# 所以固定成 32 MiB —— 够 daed 起来之后把冷页换出去，又不至于喧宾夺主。
+#
+# lzo-rle 是 A53 上速度与压缩比的平衡点。init 脚本在 UCI 不给算法时会退回
+# 纯 lzo，这里显式写死，免得默认值哪天变了。
+uci -q batch <<-EOT
+	set system.@system[0].zram_size_mb='32'
+	set system.@system[0].zram_comp_algo='lzo-rle'
+	commit system
+EOT
+
+exit 0
