@@ -73,7 +73,8 @@ for p in chat comgt ppp luci-proto-ppp kmod-usb-serial-option kmod-usb-serial-ww
 done
 echo "  --- files 覆盖层里的 EC200G 组件 ---"
 for f in etc/init.d/ec200g etc/ppp/ec200g-connect etc/uci-defaults/99-ec200g-qmodem \
-         usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold usr/sbin/qmodem-atports-patch \n         usr/sbin/qmodem-atlock-patch; do
+         usr/sbin/cmux usr/sbin/sim_start usr/sbin/gsm-hold usr/sbin/qmodem-atports-patch \
+         usr/sbin/qmodem-atlock-patch; do
     if [ -f "$W/files/$f" ]; then ok "files/$f"; else bad "files/$f 缺失"; fi
 done
 PPP_DEFAULTS="$W/files/etc/uci-defaults/99-ec200g-qmodem"
@@ -278,7 +279,9 @@ grep -q 'percentage of the maximum power, not dBm' "$ENCP" 2>/dev/null &&
 for v in _mtband _mtmode _mtwidth mtCompose; do
     grep -q "$v" "$ENCP" 2>/dev/null || bad "四段式频率控件缺少 $v"
 done
-[ "$(grep -c 'forcewrite=true' "$ENCP" 2>/dev/null)" = "2" ] &&
+# 补丁是压成单行的 sed 替换串，两个 forcewrite 在同一行上，
+# grep -c 数的是行数不是出现次数，必须 -o 拆开再计数。
+[ "$(grep -o 'forcewrite=true' "$ENCP" 2>/dev/null | wc -l)" -eq 2 ] &&
     ok "_mtmode / _mtwidth 均为 forcewrite（只改一个时也能组合出 htmode）" ||
     bad "_mtmode / _mtwidth 的 forcewrite 不是两处 —— 单独改模式或宽度会丢失"
 grep -q "CBIWifiCountryValue,'country'" "$ENCP" 2>/dev/null &&
