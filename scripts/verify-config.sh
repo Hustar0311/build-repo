@@ -325,11 +325,31 @@ else
     bad "缺少 30-zram 或没写死 32 MiB —— 会按 MemTotal/2 开出一百多 MiB"
 fi
 
-echo "========== 5e. dae / daed 透明代理 =========="
-for p in dae dae-geoip dae-geosite luci-app-dae luci-i18n-dae-zh-cn \
-         daed daed-geoip daed-geosite luci-app-daed luci-i18n-daed-zh-cn \
-         v2ray-geoip v2ray-geosite kmod-xdp-sockets-diag; do
+echo "========== 5e. dae / daed / daede 透明代理 =========="
+for p in dae daed luci-app-daede v2ray-geoip v2ray-geosite; do
     need_cfg "CONFIG_PACKAGE_$p" "$p"
+done
+need_cfg CONFIG_PACKAGE_luci-app-daede_daed "面板默认后端 daed"
+need_cfg CONFIG_DAE_USE_KERNEL_BTF   "dae 用内核自带 BTF"
+need_cfg CONFIG_DAED_USE_KERNEL_BTF  "daed 用内核自带 BTF"
+# 官方 feed 那套面板不能同时选：它和 daede 抢同一份 /etc/config/daed，
+# 而 daede 的 postinst 会直接删掉官方的中文 lmo。
+for p in luci-app-dae luci-app-daed; do
+    if grep -q "^CONFIG_PACKAGE_$p=y" .config; then
+        bad "$p 被选中了 —— 会和 luci-app-daede 抢配置，二选一"
+    else
+        ok "$p 未选（与 luci-app-daede 互斥）"
+    fi
+done
+# dae/daed 两个 feed 都有，必须确认最终用的是 daede 那份，
+# 否则 luci-app-daede 的脚本会对着一个版本对不上的后端跑。
+for p in dae daed luci-app-daede; do
+    link=$(readlink -f package/feeds/daede/$p 2>/dev/null)
+    if [ -n "$link" ] && [ -d "$link" ]; then
+        ok "$p 来自 daede feed"
+    else
+        bad "$p 不是从 daede feed 装的 —— feeds install -p daede -f 没生效"
+    fi
 done
 # CO-RE 的 eBPF 要在运行时读 /sys/kernel/btf/vmlinux，没有 BTF 就是加载即失败。
 # REDUCED 是重点：它默认 y（因为我们不是 buildbot），而 BTF depends on !REDUCED，

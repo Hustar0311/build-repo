@@ -12,6 +12,7 @@ env:
   REPO_URL: https://github.com/chasey-dev/immortalwrt-mt798x-rebase
   REPO_BRANCH: '25.12'
   QMODEM_FEED: https://github.com/FUjr/QModem.git
+  DAEDE_FEED: https://github.com/kenzok8/openwrt-daede.git
   DEVICE: fzs_5gcpe-p3
   TZ: Asia/Shanghai
 
@@ -59,11 +60,15 @@ jobs:
           echo "源码提交：$(git rev-parse --short HEAD)"
           echo "OPENWRT_PATH=$GITHUB_WORKSPACE/openwrt" >> $GITHUB_ENV
 
-      - name: 加入 QModem feed
+      - name: 加入 QModem 与 daede feed
         working-directory: ./openwrt
         run: |
           grep -q "qmodem" feeds.conf.default || \
             echo "src-git qmodem $QMODEM_FEED" >> feeds.conf.default
+          # daede 排在最后：官方 packages feed 也有 dae/daed，谁先谁赢，
+          # 下一步会显式 -p daede -f 覆盖成这个源的版本。
+          grep -q "daede" feeds.conf.default || \
+            echo "src-git daede $DAEDE_FEED" >> feeds.conf.default
           cat feeds.conf.default
 
       - name: 更新并安装 feeds
@@ -71,6 +76,15 @@ jobs:
         run: |
           ./scripts/feeds update -a
           ./scripts/feeds install -a
+          # dae 和 daed 在 immortalwrt/packages 和 daede 两个 feed 里都有，
+          # install -a 按 feeds.conf 顺序取先出现的（官方那份）。这里强制
+          # 换成 daede 的版本：luci-app-daede 的那套脚本是按它自己的包布局
+          # 和版本写的，混用官方后端会对不上。
+          ./scripts/feeds install -p daede -f dae daed luci-app-daede
+          echo "=== dae/daed/luci-app-daede 的实际来源 ==="
+          for p in dae daed luci-app-daede; do
+            printf '  %-18s -> %s\n' "$p" "$(readlink -f package/feeds/*/$p 2>/dev/null | head -1)"
+          done
 
       - name: 注入机型定义
         working-directory: ./openwrt
