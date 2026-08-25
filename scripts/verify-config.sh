@@ -295,6 +295,14 @@ else
     bad "p3-uipatch 缺少射频配置兜底或启动顺序不对"
 fi
 
+echo "========== 5c. daed/dae 的 eBPF 前置内核模块 =========="
+# 这三个 kmod 不在 ImmortalWrt 官方源里可单独补装 —— kmod 的 vermagic 哈希
+# 由内核 .config 算出，自编固件的哈希与官方源永远对不上。漏掉就只能重刷一次，
+# 所以必须在编译期确认它们在。
+for p in kmod-sched-core kmod-sched-bpf kmod-veth; do
+    need_cfg "CONFIG_PACKAGE_$p" "$p（daed 依赖）"
+done
+
 echo "========== 6. 机型与镜像格式 =========="
 need_cfg CONFIG_TARGET_mediatek                              "目标 mediatek"
 need_cfg CONFIG_TARGET_mediatek_filogic                      "子目标 filogic"

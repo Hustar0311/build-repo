@@ -141,6 +141,13 @@ jobs:
           cp -f *sysupgrade.bin *factory.bin "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
           cp -f config.buildinfo feeds.buildinfo version.buildinfo sha256sums \
                 "$GITHUB_WORKSPACE/artifact/" 2>/dev/null || true
+          # kmod 的 vermagic 哈希由本次构建的内核 .config 决定，事后无法在别处重现。
+          # 把 kmods/ 和 target packages/ 一并留档，以后缺包可直接
+          # apk add --allow-untrusted 补装，不必为了一个模块重刷整个固件。
+          mkdir -p "$GITHUB_WORKSPACE/artifact-packages"
+          cp -rf kmods packages "$GITHUB_WORKSPACE/artifact-packages/" 2>/dev/null || true
+          echo "=== kmods 目录（内核版本-哈希）==="
+          ls -1 "$GITHUB_WORKSPACE/artifact-packages/kmods" 2>/dev/null || echo "（无）"
           cd "$GITHUB_WORKSPACE/artifact" && ls -la && sha256sum *.bin
 
       - name: 上传固件
@@ -150,6 +157,15 @@ jobs:
           name: firmware
           path: artifact/
           retention-days: 30
+
+      - name: 上传软件包与内核模块
+        if: ${{ !inputs.verify_only }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifact-packages/
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: 上传校验产物
         if: always()
