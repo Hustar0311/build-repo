@@ -105,6 +105,31 @@ jobs:
           done
           [ "$fail" = "0" ]
 
+      - name: 给 daede 的 dae/daed 补上 BPF 工具链依赖
+        working-directory: ./openwrt
+        run: |
+          set -e
+          # daede feed 的 dae/daed 漏了 $(BPF_DEPENDS) 这条依赖声明。后果很绕：
+          #   BPF_DEPENDS := @HAS_BPF_TOOLCHAIN +@NEED_BPF_TOOLCHAIN
+          #   BPF_TOOLCHAIN_BUILD_LLVM: select USE_LLVM_BUILD if NEED_BPF_TOOLCHAIN
+          # 没有包去 select NEED_BPF_TOOLCHAIN，USE_LLVM_BUILD 就不会被选，
+          # LLVM 压根不编；而 HAS_BPF_TOOLCHAIN 仍然是 y（默认 !NONE 即 y），
+          # 于是 bpf.mk 走到 LLVM_PATH:=/invalid 这个兜底分支，编到
+          # package/kernel/bpf-headers 时报 "/invalid/clang: No such file"
+          # 和 "LLVM/clang version too old. Minimum required: 12, found: ."
+          # 官方 feed 的 dae/daed 是带 $(BPF_DEPENDS) 的，换源才暴露出来。
+          for m in package/feeds/daede/dae/Makefile package/feeds/daede/daed/Makefile; do
+            [ -f "$m" ] || { echo "找不到 $m"; exit 1; }
+            if grep -q 'BPF_DEPENDS' "$m"; then
+              echo "  $m 已有 BPF_DEPENDS，跳过"
+            else
+              sed -i 's|DEPENDS:=$(GO_ARCH_DEPENDS)|DEPENDS:=$(GO_ARCH_DEPENDS) $(BPF_DEPENDS)|' "$m"
+              grep -q 'BPF_DEPENDS' "$m" || { echo "  $m 打补丁失败"; exit 1; }
+              echo "  $m 已补上 BPF_DEPENDS"
+            fi
+            grep -n 'DEPENDS:=' "$m"
+          done
+
       - name: 注入机型定义
         working-directory: ./openwrt
         run: |

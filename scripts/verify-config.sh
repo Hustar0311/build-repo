@@ -372,6 +372,18 @@ if grep -q "^CONFIG_KERNEL_DEBUG_INFO_REDUCED=y" .config; then
 else
     ok "KERNEL_DEBUG_INFO_REDUCED 已关（BTF 的硬前提）"
 fi
+# bpf-headers 编译时要真的有一个 clang。这里踩过坑：BPF_TOOLCHAIN_BUILD_LLVM
+# 被选中不等于 LLVM 会被编 —— 它是 "select USE_LLVM_BUILD if NEED_BPF_TOOLCHAIN"，
+# 而 NEED_BPF_TOOLCHAIN 要靠包的 +@NEED_BPF_TOOLCHAIN 依赖去 select。daede 的
+# dae/daed 漏了 $(BPF_DEPENDS) 这条声明（官方 feed 那份是有的），于是没人选它，
+# LLVM 不编，bpf.mk 落到 LLVM_PATH:=/invalid，一路编到 bpf-headers 才报
+# "/invalid/clang: No such file"。build.yml 里补了这条依赖，这里卡住结果。
+need_cfg CONFIG_NEED_BPF_TOOLCHAIN "NEED_BPF_TOOLCHAIN（不选中 LLVM 根本不会被编）"
+if grep -qE "^CONFIG_USE_LLVM_(BUILD|PREBUILT|HOST)=y" .config; then
+    ok "LLVM 来源已确定（$(grep -oE '^CONFIG_USE_LLVM_[A-Z]+=y' .config | head -1)）"
+else
+    bad "没有任何 USE_LLVM_* 被选中 —— bpf.mk 会把 CLANG 指到 /invalid/clang"
+fi
 # @HAS_BPF_TOOLCHAIN 是 dae/daed 的硬依赖；它为假时 defconfig 会静默丢包。
 # 上面的 need_cfg 会先报出来，这里补一句原因，省得对着 .config 猜。
 if grep -q "^CONFIG_HAS_BPF_TOOLCHAIN=y" .config; then
